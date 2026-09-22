@@ -39,16 +39,7 @@ class UserResponse(BaseModel):
     id: uuid.UUID
     email: str
     is_active: bool
-    is_verified: bool
-    full_name: str | None
-    avatar_url: str | None
-    timezone: str
-    language: str
-    email_notifications: bool
-    oauth_provider: str | None
-    two_factor_enabled: bool
     created_at: datetime
-    updated_at: datetime
 
     class Config:
         from_attributes = True
@@ -114,7 +105,7 @@ class UpdateEmailRequest(BaseModel):
 
 class Token(BaseModel):
     access_token: str
-    refresh_token: str | None = None
+    refresh_token: str  # Always returned by every auth flow (login, OAuth callbacks, refresh)
     token_type: str
 
 class TokenData(BaseModel):
@@ -159,18 +150,33 @@ class OAuthUrlResponse(BaseModel):
 class OAuthCallbackRequest(BaseModel):
     code: str
 
-class UserResponse(BaseModel):
+
+class UserPreferencesCreate(BaseModel):
+    job_keywords: str | None = None
+    preferred_locations: list[str] | None = None
+    preferred_contract_types: list[str] | None = None
+    remote_preference: bool | None = None
+    min_salary: int | None = None
+    target_roles: list[str] | None = None
+    application_mode: str | None = None  # RECOMMEND_ONLY or AUTO_APPLY
+    min_match_score: float | None = None
+    max_applications_per_day: int | None = None
+
+
+class UserPreferencesResponse(BaseModel):
     id: uuid.UUID
-    email: str
-    is_active: bool
+    user_id: uuid.UUID
+    job_keywords: str
+    preferred_locations: list[str]
+    preferred_contract_types: list[str]
+    remote_preference: bool
+    min_salary: int | None
+    target_roles: list[str] = []
+    application_mode: str = "RECOMMEND_ONLY"
+    min_match_score: float = 80.0
+    max_applications_per_day: int = 5
     created_at: datetime
+    updated_at: datetime
 
     class Config:
         from_attributes = True
-
-class Token(BaseModel):
-    access_token: str
-    token_type: str
-
-class TokenData(BaseModel):
-    email: str | None = None

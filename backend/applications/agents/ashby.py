@@ -1,6 +1,6 @@
 import time
 import os
-from typing import List, Any
+from typing import List, Any, Dict, Optional
 from applications.agents.base import BasePlatformAgent
 
 
@@ -69,10 +69,12 @@ class AshbyAgent(BasePlatformAgent):
         cover_letter: str,
         skills: List[str],
         experiences: List[Any],
-        add_log
-    ) -> bool:
+        add_log,
+        user_responses: Optional[Dict[str, str]] = None
+    ) -> dict:
         add_log("FILL_ASHBY", "Interface Ashby détectée. Clic sur l'onglet 'Apply'...")
         fields_filled = 0
+        pending_questions = []
 
         # Step 1: Click the Apply tab
         try:
@@ -81,6 +83,25 @@ class AshbyAgent(BasePlatformAgent):
                 apply_tab.click()
                 add_log("FILL_ASHBY", "Onglet 'Apply' cliqué. Attente du chargement du formulaire (6s)...", "SUCCESS")
                 time.sleep(6)
+                
+                # Screenshot: After clicking Apply tab
+                try:
+                    if hasattr(page, '_screenshots') and hasattr(page, '_screenshot_dir'):
+                        screenshot_dir = page._screenshot_dir
+                        screenshot_dict = page._screenshots
+                        
+                        after_apply_screenshot = f"/static/{screenshot_dir}/ashby_after_apply.png"
+                        after_apply_abs = os.path.join("/app/static", screenshot_dir, "ashby_after_apply.png")
+                        try:
+                            page.screenshot(path=after_apply_abs, full_page=True, timeout=60000)
+                        except Exception:
+                            # Fallback to non-full-page screenshot
+                            page.screenshot(path=after_apply_abs, timeout=60000)
+                        screenshot_dict["ashby_after_apply"] = after_apply_screenshot
+                        add_log("FILL_ASHBY", "Capture d'écran : formulaire après clic Apply", "INFO")
+                except Exception as e:
+                    add_log("FILL_ASHBY", f"Impossible de capturer après clic Apply : {str(e)}", "WARNING")
+                    
             else:
                 add_log("FILL_ASHBY", "Onglet 'Apply' non trouvé. Recherche directe des champs...", "WARNING")
                 time.sleep(2)
@@ -94,7 +115,7 @@ class AshbyAgent(BasePlatformAgent):
         if is_gem:
             add_log("FILL_ASHBY", "Widget Gem.com détecté. Délégation au GemAgent...", "SUCCESS")
             from applications.agents.gem import GemAgent
-            return GemAgent().fill_form(page, cv, personal_info, cover_letter, skills, experiences, add_log)
+            return GemAgent().fill_form(page, cv, personal_info, cover_letter, skills, experiences, add_log, user_responses)
 
         # Step 4: Check if inline form looks like Gem (by page content)
         try:
@@ -102,7 +123,7 @@ class AshbyAgent(BasePlatformAgent):
             if "gem.com" in page_content or "powered by gem" in page_content:
                 add_log("FILL_ASHBY", "Widget Gem inline détecté dans le DOM. Délégation au GemAgent...", "SUCCESS")
                 from applications.agents.gem import GemAgent
-                return GemAgent().fill_form(page, cv, personal_info, cover_letter, skills, experiences, add_log)
+                return GemAgent().fill_form(page, cv, personal_info, cover_letter, skills, experiences, add_log, user_responses)
         except Exception:
             pass
 
@@ -177,30 +198,235 @@ class AshbyAgent(BasePlatformAgent):
                     if current_val and len(current_val.strip()) > 5:
                         continue
                     placeholder = ta.get_attribute("placeholder") or ""
-                    question = placeholder if placeholder else "Why are you a strong fit?"
-                    answer = self.ask_llm(question, cv_text, cover_letter)
-                    if answer:
+                    
+                    # Look up label from DOM context if placeholder is missing
+                    ta_label = ""
+                    try:
+                        ta_label = ta.evaluate(r"""el => {
+                            if (el.id) {
+                                const l = document.querySelector('label[for="' + el.id + '"]');
+                                if (l) return l.textContent.trim();
+                            }
+                            const p = el.closest('label');
+                            if (p) return p.textContent.trim();
+                            const c = el.closest('.field') || el.closest('[class*="field"]') || el.closest('[class*="question"]') || el.parentElement;
+                            if (c) {
+                                const l = c.querySelector('label, [class*="label"], span, p, h3, h4');
+                                if (l && l !== el) return l.textContent.trim();
+                            }
+                            return '';
+                        }""") or ""
+                    except Exception:
+                        pass
+                    
+                    question = ta_label or placeholder or "Why are you a strong fit for this role?"
+                    label = ta_label or placeholder or "Additional Information"
+                    
+                    # Check if user has provided an answer
+                    field_id = self._get_field_id(ta)
+                    if user_responses and field_id in user_responses:
+                        answer = user_responses[field_id]
+                        add_log("FILL_ASHBY", f"✅ Utilisation de la réponse utilisateur pour : {field_id}", "SUCCESS")
+                    else:
+                        answer = self.ask_llm(question, cv_text, cover_letter)
+                    
+                    if answer and answer.lower() not in ("none", "n/a", ""):
                         ta.fill(answer, timeout=3000)
                         fields_filled += 1
-                        add_log("FILL_ASHBY", f"✅ 🤖 Textarea rempli par IA.", "SUCCESS")
+                        add_log("FILL_ASHBY", f"✅ 🤖 Textarea '{label[:30]}' rempli par IA.", "SUCCESS")
+                    else:
+                        # Add to pending questions if it looks important
+                        is_required = self._is_field_required(ta)
+                        if is_required or any(keyword in label.lower() for keyword in ["salary", "cover", "motivation", "why"]):
+                            pending_questions.append(self._build_pending_question(field_id, label, "textarea", is_required))
+                            add_log("FILL_ASHBY", f"⚠️ Question en attente : {label}", "WARNING")
             except Exception as e:
                 add_log("FILL_ASHBY", f"⚠️ Erreur IA textareas : {str(e)[:80]}", "WARNING")
 
             # Handle radio buttons
             try:
-                radios = form_ctx.query_selector_all("input[type='radio']")
-                if radios:
-                    from applications.agents.gem import GemAgent
-                    gem = GemAgent()
-                    radio_groups = gem._find_radio_groups(form_ctx, add_log)
-                    for q, opts in radio_groups.items():
-                        chosen = self.ask_llm_choose_option(q, opts, cv_text)
-                        gem._click_radio_option(form_ctx, q, chosen, add_log)
-                        fields_filled += 1
+                radio_elements = form_ctx.query_selector_all("input[type='radio']")
+                if radio_elements:
+                    radio_groups = {}
+                    for radio in radio_elements:
+                        try:
+                            info = radio.evaluate(r'''r => {
+                                let optLabel = '';
+                                if (r.id) {
+                                    const lbl = document.querySelector('label[for="' + r.id + '"]');
+                                    if (lbl) optLabel = lbl.innerText.trim();
+                                }
+                                if (!optLabel) {
+                                    const p = r.closest('label');
+                                    if (p) optLabel = p.innerText.trim();
+                                }
+                                let question = '';
+                                const container = r.closest('fieldset') || r.closest('[class*="question"]') || r.closest('[class*="field"]') || r.closest('[class*="group"]');
+                                if (container) {
+                                    const legend = container.querySelector('legend, label:not([for]), p, span, h3, h4');
+                                    if (legend) question = legend.innerText.trim();
+                                }
+                                if (!question) {
+                                    let el = r.closest('div');
+                                    while (el) {
+                                        const prev = el.previousElementSibling;
+                                        if (prev && prev.innerText && prev.innerText.trim().length > 3) {
+                                            question = prev.innerText.trim();
+                                            break;
+                                        }
+                                        el = el.parentElement;
+                                    }
+                                }
+                                return { name: r.name, optLabel, question };
+                            }''')
+                            name = info.get('name')
+                            if not name:
+                                continue
+                            if name not in radio_groups:
+                                radio_groups[name] = {'question': info.get('question') or name, 'options': []}
+                            radio_groups[name]['options'].append({'label': info.get('optLabel') or '', 'element': radio})
+                            if info.get('question') and not radio_groups[name]['question']:
+                                radio_groups[name]['question'] = info['question']
+                        except Exception:
+                            continue
+
+                    for name, group_data in radio_groups.items():
+                        question = group_data['question']
+                        options = [opt for opt in group_data['options'] if opt['label']]
+                        opt_labels = [opt['label'] for opt in options]
+                        if not question or not opt_labels:
+                            continue
+                        field_id = question.lower().replace(" ", "_").replace("?", "")[:40]
+                        if user_responses and field_id in user_responses:
+                            chosen = user_responses[field_id]
+                            add_log("FILL_ASHBY", f"✅ Utilisation de la réponse utilisateur pour : {field_id}", "SUCCESS")
+                        else:
+                            chosen = self.ask_llm_choose_option(question, opt_labels, cv_text)
+
+                        clicked = False
+                        if chosen:
+                            for opt in options:
+                                if chosen.lower() in opt['label'].lower() or opt['label'].lower() in chosen.lower():
+                                    try:
+                                        opt['element'].click(force=True, timeout=3000)
+                                        fields_filled += 1
+                                        clicked = True
+                                        add_log("FILL_ASHBY", f"✅ Radio cliqué : '{opt['label']}'", "SUCCESS")
+                                        break
+                                    except Exception:
+                                        pass
+                        if not clicked:
+                            is_required = self._is_radio_group_required(form_ctx, question)
+                            if is_required or any(keyword in question.lower() for keyword in ["sponsorship", "visa", "work authorization", "contract"]):
+                                pending_questions.append(self._build_pending_question(field_id, question, "radio", is_required, opt_labels))
+                                add_log("FILL_ASHBY", f"⚠️ Question en attente : {question}", "WARNING")
             except Exception as e:
                 add_log("FILL_ASHBY", f"⚠️ Erreur IA radios : {str(e)[:80]}", "WARNING")
 
-        return fields_filled > 0
+            # Handle select dropdowns
+            try:
+                selects = form_ctx.query_selector_all("select")
+                for sel in selects:
+                    if not sel.is_visible():
+                        continue
+                    current_val = sel.input_value()
+                    if current_val:
+                        continue
+                    
+                    field_id = self._get_field_id(sel)
+                    label = sel.get_attribute("name") or sel.get_attribute("id") or "Dropdown"
+                    
+                    # Get options
+                    options = []
+                    for opt in sel.query_selector_all("option"):
+                        opt_text = opt.inner_text().strip()
+                        if opt_text and opt_text not in ["", "Select...", "Choose..."]:
+                            options.append(opt_text)
+                    
+                    # Check if user has provided an answer
+                    if user_responses and field_id in user_responses:
+                        chosen = user_responses[field_id]
+                        add_log("FILL_ASHBY", f"✅ Utilisation de la réponse utilisateur pour : {field_id}", "SUCCESS")
+                    else:
+                        # Try to choose via LLM
+                        if options:
+                            chosen = self.ask_llm_choose_option(label, options, cv_text)
+                        else:
+                            chosen = None
+                    
+                    if chosen and chosen in options:
+                        sel.select_option(chosen)
+                        fields_filled += 1
+                        add_log("FILL_ASHBY", f"✅ Dropdown rempli : {label}", "SUCCESS")
+                    else:
+                        # Add to pending questions if required
+                        is_required = self._is_field_required(sel)
+                        if is_required:
+                            pending_questions.append(self._build_pending_question(field_id, label, "select", is_required, options))
+                            add_log("FILL_ASHBY", f"⚠️ Question en attente : {label}", "WARNING")
+            except Exception as e:
+                add_log("FILL_ASHBY", f"⚠️ Erreur IA selects : {str(e)[:80]}", "WARNING")
+
+        # Screenshot: After form filling
+        try:
+            if hasattr(page, '_screenshots') and hasattr(page, '_screenshot_dir'):
+                screenshot_dir = page._screenshot_dir
+                screenshot_dict = page._screenshots
+                
+                after_fill_screenshot = f"/static/{screenshot_dir}/ashby_after_fill.png"
+                after_fill_abs = os.path.join("/app/static", screenshot_dir, "ashby_after_fill.png")
+                try:
+                    page.screenshot(path=after_fill_abs, full_page=True, timeout=60000)
+                except Exception:
+                    # Fallback to non-full-page screenshot
+                    page.screenshot(path=after_fill_abs, timeout=60000)
+                screenshot_dict["ashby_after_fill"] = after_fill_screenshot
+                add_log("FILL_ASHBY", "Capture d'écran : formulaire après remplissage", "INFO")
+        except Exception as e:
+            add_log("FILL_ASHBY", f"Impossible de capturer après remplissage : {str(e)}", "WARNING")
+
+        return {
+            "success": fields_filled > 0,
+            "pending_questions": pending_questions
+        }
+
+    def _is_field_required(self, element) -> bool:
+        """Check if a form field is marked as required."""
+        try:
+            # Check required attribute
+            if element.get_attribute("required"):
+                return True
+            # Check for required class
+            class_attr = element.get_attribute("class") or ""
+            if "required" in class_attr.lower():
+                return True
+            # Check for aria-required
+            if element.get_attribute("aria-required") == "true":
+                return True
+            # Check label for asterisk
+            try:
+                label = element.evaluate("el => { const labels = el.labels; return labels && labels.length > 0 ? labels[0].textContent : ''; }")
+                if label and "*" in label:
+                    return True
+            except Exception:
+                pass
+            return False
+        except Exception:
+            return False
+
+    def _is_radio_group_required(self, form_ctx, question_text: str) -> bool:
+        """Check if a radio button group is required."""
+        try:
+            # Find the radio inputs for this question
+            # This is a heuristic - in practice, you'd need to match the question to its container
+            radios = form_ctx.query_selector_all("input[type='radio']")
+            for radio in radios:
+                # Check if any radio in the group is marked required
+                if self._is_field_required(radio):
+                    return True
+            return False
+        except Exception:
+            return False
 
     def submit_form(self, page, add_log) -> bool:
         # If Gem widget is present, delegate submission to GemAgent
@@ -236,6 +462,25 @@ class AshbyAgent(BasePlatformAgent):
                         add_log("SUBMIT_ASHBY", f"Bouton soumission trouvé ({sel}). Clic...", "INFO")
                         btn.click(force=True, timeout=5000)
                         time.sleep(4)
+                        
+                        # Screenshot: After submission
+                        try:
+                            if hasattr(page, '_screenshots') and hasattr(page, '_screenshot_dir'):
+                                screenshot_dir = page._screenshot_dir
+                                screenshot_dict = page._screenshots
+                                
+                                after_submit_screenshot = f"/static/{screenshot_dir}/ashby_after_submit.png"
+                                after_submit_abs = os.path.join("/app/static", screenshot_dir, "ashby_after_submit.png")
+                                try:
+                                    page.screenshot(path=after_submit_abs, full_page=True, timeout=60000)
+                                except Exception:
+                                    # Fallback to non-full-page screenshot
+                                    page.screenshot(path=after_submit_abs, timeout=60000)
+                                screenshot_dict["ashby_after_submit"] = after_submit_screenshot
+                                add_log("SUBMIT_ASHBY", "Capture d'écran : page après soumission", "INFO")
+                        except Exception as e:
+                            add_log("SUBMIT_ASHBY", f"Impossible de capturer après soumission : {str(e)}", "WARNING")
+                        
                         return True
                 except Exception:
                     pass

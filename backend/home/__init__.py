@@ -1,0 +1,1 @@
+"""Candidate-facing home aggregation."""

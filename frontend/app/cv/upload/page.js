@@ -1,25 +1,42 @@
 'use client';
 
 import { useState } from 'react';
-import Navbar from '../../../components/Navbar';
-import { useRouter } from 'next/navigation';
-import api from '../../../lib/api';
-import { UploadCloud, FileText, ArrowLeft, Loader2 } from 'lucide-react';
 import Link from 'next/link';
+import { useRouter } from 'next/navigation';
+import CandidateShell from '../../../components/layout/CandidateShell';
+import { cvApi } from '../../../lib/api/cv';
+import {
+  UploadCloud, FileText, ArrowLeft, CheckCircle2, AlertCircle, Sparkles, RefreshCw
+} from 'lucide-react';
 
-export default function CVUploadPage() {
-  const [file, setFile] = useState(null);
-  const [uploading, setUploading] = useState(false);
-  const [dragActive, setDragActive] = useState(false);
-  const [error, setError] = useState('');
+export default function UploadPage() {
   const router = useRouter();
+  const [file, setFile] = useState(null);
+  const [dragActive, setDragActive] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [statusMessage, setStatusMessage] = useState('');
+  const [error, setError] = useState('');
+
+  const validateAndSetFile = (selectedFile) => {
+    if (!selectedFile) return;
+    if (!selectedFile.name.toLowerCase().endsWith('.pdf')) {
+      setError('Please choose a valid PDF file (.pdf).');
+      return;
+    }
+    if (selectedFile.size > 10 * 1024 * 1024) {
+      setError('The PDF file must be 10 MB or smaller.');
+      return;
+    }
+    setFile(selectedFile);
+    setError('');
+  };
 
   const handleDrag = (e) => {
     e.preventDefault();
     e.stopPropagation();
-    if (e.type === "dragenter" || e.type === "dragover") {
+    if (e.type === 'dragenter' || e.type === 'dragover') {
       setDragActive(true);
-    } else if (e.type === "dragleave") {
+    } else if (e.type === 'dragleave') {
       setDragActive(false);
     }
   };
@@ -28,186 +45,168 @@ export default function CVUploadPage() {
     e.preventDefault();
     e.stopPropagation();
     setDragActive(false);
-
     if (e.dataTransfer.files && e.dataTransfer.files[0]) {
-      const droppedFile = e.dataTransfer.files[0];
-      if (droppedFile.type === "application/pdf") {
-        setFile(droppedFile);
-        setError('');
-      } else {
-        setError("Seuls les fichiers PDF sont acceptés.");
-      }
+      validateAndSetFile(e.dataTransfer.files[0]);
     }
   };
 
-  const handleChange = (e) => {
-    e.preventDefault();
-    if (e.target.files && e.target.files[0]) {
-      const selectedFile = e.target.files[0];
-      if (selectedFile.type === "application/pdf") {
-        setFile(selectedFile);
-        setError('');
-      } else {
-        setError("Seuls les fichiers PDF sont acceptés.");
-      }
-    }
-  };
-
-  const handleSubmit = async (e) => {
-    e.preventDefault();
+  const handleUpload = async () => {
     if (!file) return;
-
     setUploading(true);
     setError('');
-
-    const formData = new FormData();
-    formData.append('file', file);
+    setStatusMessage('Uploading PDF and extracting skills & experience…');
 
     try {
-      const response = await api.post('/cv/upload', formData, {
-        headers: {
-          'Content-Type': 'multipart/form-data',
-        },
-        timeout: 60000 // Avoir un timeout généreux pour l'extraction de l'IA (60s)
-      });
-      // Redirect to newly parsed CV page
-      router.push(`/cv/${response.data.id}`);
+      const cv = await cvApi.upload(file);
+      setStatusMessage('✓ CV successfully processed! Redirecting to profile…');
+      setTimeout(() => {
+        router.push('/cv');
+      }, 1000);
     } catch (err) {
-      console.error(err);
-      setError(err.response?.data?.detail || "Une erreur est survenue pendant le parsing de votre CV par l'IA.");
+      console.error('CV upload error:', err);
+      const detail = err.response?.data?.detail || 'We could not analyze this PDF file. Please ensure it is a valid, text-based PDF.';
+      setError(detail);
+      setStatusMessage('');
       setUploading(false);
     }
   };
 
   return (
-    <div>
-      <Navbar />
-      <main className="container" style={{ maxWidth: '800px' }}>
-        <div style={{ marginBottom: '2rem', marginTop: '1rem' }}>
-          <Link href="/cv" style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', color: 'var(--text-secondary)', fontSize: '0.9rem', marginBottom: '1rem' }}>
-            <ArrowLeft size={16} />
-            Retour à mes CVs
+    <CandidateShell>
+      <div className="page" style={{ maxWidth: '720px' }}>
+
+        {/* Back Link */}
+        <div style={{ marginBottom: '24px' }}>
+          <Link href="/cv" className="disc-quiet-link" style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
+            <ArrowLeft size={15} /> Back to My CV
           </Link>
-          <h1 className="gradient-text" style={{ fontSize: '2.2rem', marginBottom: '0.25rem' }}>Ajouter un CV</h1>
-          <p style={{ color: 'var(--text-secondary)' }}>Uploadez votre CV en format PDF pour que l'IA puisse le structurer sémantiquement.</p>
         </div>
 
-        {error && (
-          <div style={{
-            background: 'rgba(239, 68, 68, 0.1)',
-            border: '1px solid var(--error)',
-            color: 'var(--error)',
-            padding: '1rem',
-            borderRadius: '8px',
-            marginBottom: '2rem'
-          }}>
-            {error}
-          </div>
-        )}
+        {/* Header */}
+        <div style={{ marginBottom: '32px' }}>
+          <p className="eyebrow" style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '8px' }}>
+            <UploadCloud size={12} /> CV Upload & Analysis
+          </p>
+          <h1 style={{ fontSize: 'clamp(26px, 4vw, 36px)', fontWeight: 800, letterSpacing: '-0.04em', margin: '0 0 10px', color: 'var(--ink)' }}>
+            Upload or Replace CV
+          </h1>
+          <p style={{ color: 'var(--muted)', fontSize: '15px', margin: 0 }}>
+            Upload your PDF resume. Our AI agent will extract your skills, experience, and update your compatibility match scores.
+          </p>
+        </div>
 
-        {uploading ? (
-          <div className="glass-card" style={{
-            display: 'flex',
-            flexDirection: 'column',
-            alignItems: 'center',
-            justifyContent: 'center',
-            padding: '5rem 2rem',
-            textAlign: 'center',
-            gap: '1.5rem'
-          }}>
-            <Loader2 size={48} className="animate-spin" style={{ color: 'var(--primary)', animation: 'spin 2s linear infinite' }} />
-            <div>
-              <h3 style={{ fontSize: '1.4rem', marginBottom: '0.5rem' }}>Analyse de votre CV par l'IA...</h3>
-              <p style={{ color: 'var(--text-secondary)', maxWidth: '450px' }}>
-                Cela peut prendre jusqu'à 15 secondes. Notre modèle extrait vos expériences, vos formations et normalise vos compétences clés.
-              </p>
-            </div>
-            {/* Simple CSS animation style inside react for spin */}
-            <style jsx global>{`
-              @keyframes spin {
-                from { transform: rotate(0deg); }
-                to { transform: rotate(360deg); }
-              }
-            `}</style>
+        {/* Notice Card */}
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: '12px',
+          background: 'var(--mint)', border: '1px solid #b6dcc2',
+          borderRadius: '12px', padding: '16px 20px', marginBottom: '24px'
+        }}>
+          <Sparkles size={18} style={{ color: 'var(--pine)', flexShrink: 0 }} />
+          <div style={{ fontSize: '13.5px', color: 'var(--pine-dark)', lineHeight: 1.4 }}>
+            <strong>Single CV Policy:</strong> Uploading a new CV replaces your current active CV and automatically recalculates match recommendations.
           </div>
-        ) : (
-          <form onSubmit={handleSubmit}>
-            <div
-              onDragEnter={handleDrag}
-              onDragOver={handleDrag}
-              onDragLeave={handleDrag}
-              onDrop={handleDrop}
-              style={{
-                border: `2px dashed ${dragActive ? 'var(--primary)' : 'var(--border-color)'}`,
-                borderRadius: '16px',
-                padding: '4rem 2rem',
-                textAlign: 'center',
-                background: dragActive ? 'rgba(108, 99, 255, 0.05)' : 'rgba(255, 255, 255, 0.01)',
-                cursor: 'pointer',
-                transition: 'all var(--transition-fast)',
-                marginBottom: '2rem',
-                display: 'flex',
-                flexDirection: 'column',
-                alignItems: 'center',
-                gap: '1rem'
-              }}
-              onClick={() => document.getElementById('file-upload').click()}
-            >
-              <UploadCloud size={48} style={{ color: dragActive ? 'var(--primary)' : 'var(--text-muted)' }} />
+        </div>
+
+        {/* Upload Box */}
+        <div className="card" style={{ padding: '32px', textAlign: 'center' }}>
+
+          <div
+            onDragEnter={handleDrag}
+            onDragLeave={handleDrag}
+            onDragOver={handleDrag}
+            onDrop={handleDrop}
+            style={{
+              border: `2px dashed ${dragActive ? 'var(--pine)' : 'var(--line)'}`,
+              background: dragActive ? 'var(--mint)' : 'var(--soft)',
+              borderRadius: '16px', padding: '40px 24px',
+              transition: 'all 0.2s ease', cursor: 'pointer',
+              marginBottom: '24px'
+            }}
+            onClick={() => document.getElementById('cv-file-input').click()}
+          >
+            <input
+              id="cv-file-input"
+              type="file"
+              accept="application/pdf,.pdf"
+              onChange={e => validateAndSetFile(e.target.files[0])}
+              style={{ display: 'none' }}
+            />
+
+            <div style={{
+              width: '56px', height: '56px', borderRadius: '50%', background: '#fff',
+              display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 16px',
+              boxShadow: '0 2px 8px rgba(0,0,0,0.06)'
+            }}>
+              <UploadCloud size={26} style={{ color: 'var(--pine)' }} />
+            </div>
+
+            {file ? (
               <div>
-                <p style={{ fontWeight: '600', marginBottom: '0.25rem' }}>Glissez-déposez votre CV ici</p>
-                <p style={{ color: 'var(--text-secondary)', fontSize: '0.9rem' }}>ou cliquez pour parcourir vos fichiers</p>
-              </div>
-              <p style={{ color: 'var(--text-muted)', fontSize: '0.8rem' }}>Uniquement les fichiers PDF (Max. 10Mo)</p>
-              <input
-                id="file-upload"
-                type="file"
-                style={{ display: 'none' }}
-                accept=".pdf"
-                onChange={handleChange}
-              />
-            </div>
-
-            {file && (
-              <div className="glass-card" style={{
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'space-between',
-                padding: '1rem',
-                marginBottom: '2rem'
-              }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-                  <FileText style={{ color: 'var(--primary)' }} />
-                  <div>
-                    <p style={{ fontWeight: '500', fontSize: '0.95rem' }}>{file.name}</p>
-                    <p style={{ color: 'var(--text-secondary)', fontSize: '0.8rem' }}>{(file.size / (1024 * 1024)).toFixed(2)} Mo</p>
-                  </div>
+                <div style={{ display: 'inline-flex', alignItems: 'center', gap: '8px', background: '#fff', padding: '8px 16px', borderRadius: '999px', border: '1px solid var(--line)' }}>
+                  <FileText size={16} style={{ color: 'var(--pine)' }} />
+                  <span style={{ fontWeight: 700, fontSize: '14px', color: 'var(--ink)' }}>{file.name}</span>
+                  <span style={{ fontSize: '12px', color: 'var(--muted)' }}>({(file.size / (1024 * 1024)).toFixed(2)} MB)</span>
                 </div>
-                <button
-                  type="button"
-                  className="btn btn-secondary"
-                  style={{ padding: '0.4rem 0.8rem', fontSize: '0.85rem' }}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setFile(null);
-                  }}
-                >
-                  Retirer
-                </button>
+                <p style={{ fontSize: '12.5px', color: 'var(--pine)', fontWeight: 600, marginTop: '10px' }}>
+                  Click to select a different file
+                </p>
+              </div>
+            ) : (
+              <div>
+                <p style={{ fontWeight: 800, fontSize: '16px', margin: '0 0 6px', color: 'var(--ink)' }}>
+                  Drag & drop your CV here, or <span style={{ color: 'var(--pine)', textDecoration: 'underline' }}>browse</span>
+                </p>
+                <p style={{ fontSize: '13px', color: 'var(--muted)', margin: 0 }}>
+                  Supports text-based PDF files up to 10 MB.
+                </p>
               </div>
             )}
+          </div>
 
+          {error && (
+            <div style={{
+              display: 'flex', alignItems: 'center', gap: '10px',
+              background: '#fff1f2', border: '1px solid #fecdd3',
+              borderRadius: '10px', padding: '12px 16px',
+              color: '#9f1239', fontWeight: 600, fontSize: '13.5px', marginBottom: '20px',
+              textAlign: 'left'
+            }}>
+              <AlertCircle size={16} style={{ flexShrink: 0 }} />
+              {error}
+            </div>
+          )}
+
+          {statusMessage && (
+            <div style={{
+              display: 'flex', alignItems: 'center', gap: '10px',
+              background: '#f0fdf4', border: '1px solid #bbf7d0',
+              borderRadius: '10px', padding: '12px 16px',
+              color: '#166534', fontWeight: 600, fontSize: '13.5px', marginBottom: '20px',
+              textAlign: 'left'
+            }}>
+              <RefreshCw size={15} className="disc-spin" style={{ flexShrink: 0 }} />
+              {statusMessage}
+            </div>
+          )}
+
+          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '12px' }}>
+            <Link href="/cv" className="button secondary" style={{ fontSize: '14px' }}>
+              Cancel
+            </Link>
             <button
-              type="submit"
-              className="btn btn-primary"
-              style={{ width: '100%', padding: '0.85rem' }}
-              disabled={!file}
+              onClick={handleUpload}
+              disabled={!file || uploading}
+              className="button primary"
+              style={{ padding: '10px 24px', fontSize: '14.5px', fontWeight: 700, display: 'inline-flex', alignItems: 'center', gap: '8px' }}
             >
-              Lancer l'analyse intelligente
+              {uploading ? <RefreshCw size={15} className="disc-spin" /> : <UploadCloud size={15} />}
+              {uploading ? 'Analyzing PDF…' : 'Upload & Analyze CV'}
             </button>
-          </form>
-        )}
-      </main>
-    </div>
+          </div>
+
+        </div>
+
+      </div>
+    </CandidateShell>
   );
 }

@@ -1,14 +1,16 @@
 import uuid
 import json
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 from sqlalchemy.orm import Session
 from fastapi import HTTPException, status
 
 from cv_management.models import CV, PersonalInfo, CVSkill, Experience, Skill
-from job_sourcing.models import JobOffer
+from job_sourcing.models import JobOffer, JobSkill
 from matching.models import Match, MatchingConfig
 from matching.ports.similarity_calculator import IEmbeddingSimilarityCalculator
 from matching.ports.llm_matching_evaluator import ILLMMatchingEvaluator
+from matching.scoring_service import ScoringService
+from user_management.models import UserPreferences
 
 
 class MatchingService:
@@ -27,17 +29,71 @@ class MatchingService:
         return max(0.0, min(100.0, score))
 
     @staticmethod
+    def passes_user_preferences(job: JobOffer, prefs: Optional[UserPreferences]) -> bool:
+        """
+        Check if a job matches user preferences with graceful degradation.
+        
+        Returns True if job should be shown to user, False if it should be filtered out.
+        Missing data on either side results in no filtering (returns True).
+        
+        Args:
+            job: JobOffer to check
+            prefs: UserPreferences (can be None)
+        
+        Returns:
+            bool: True if job passes preferences or should not be filtered
+        """
+        if not prefs:
+            # No preferences set - no filtering
+            return True
+        
+        # Location filtering
+        if prefs.preferred_locations and job.location:
+            job_loc_lower = job.location.lower()
+            # Check if ANY preferred location matches (substring match, case-insensitive)
+            location_match = any(
+                loc.lower() in job_loc_lower 
+                for loc in prefs.preferred_locations
+            )
+            if not location_match:
+                return False
+        
+        # Contract type filtering
+        if prefs.preferred_contract_types and job.contract_type:
+            # Map synonym contract names (e.g., Internship -> STAGE, Permanent -> CDI)
+            contract_map = {
+                'INTERNSHIP': 'STAGE', 'STAGE': 'STAGE', 'INTERN': 'STAGE',
+                'PERMANENT': 'CDI', 'CDI': 'CDI', 'FULL-TIME': 'CDI', 'FULL TIME': 'CDI',
+                'FIXED-TERM': 'CDD', 'CDD': 'CDD', 'TEMPORARY': 'CDD',
+                'FREELANCE': 'FREELANCE', 'CONTRACTOR': 'FREELANCE',
+            }
+            user_contracts = set()
+            for c in prefs.preferred_contract_types:
+                raw_u = c.upper().strip()
+                user_contracts.add(contract_map.get(raw_u, raw_u))
+            
+            job_contract = job.contract_type.value.upper()
+            if user_contracts and job_contract not in user_contracts:
+                return False
+        
+        # Remote preference filtering (True = Require Remote Only, False = Open to All)
+        if prefs.remote_preference is True and job.location:
+            job_loc_lower = job.location.lower()
+            if "remote" not in job_loc_lower and "hybrid" not in job_loc_lower:
+                return False
+        
+        return True
+
+    @staticmethod
     def get_or_create_config(user_id: uuid.UUID, db: Session) -> MatchingConfig:
         """
         Get existing MatchingConfig for user or create default config on the fly.
+        The 6-factor scoring uses fixed weights, so no configuration is currently needed.
         """
         config = db.query(MatchingConfig).filter_by(user_id=user_id).first()
         if not config:
             config = MatchingConfig(
-                user_id=user_id,
-                threshold=70.0,
-                semantic_weight=0.6,
-                llm_weight=0.4
+                user_id=user_id
             )
             db.add(config)
             db.commit()
@@ -73,13 +129,29 @@ class MatchingService:
 
         config = MatchingService.get_or_create_config(user_id, db)
 
-        # 2. Calculate vector similarity
+        # 2. Calculate individual scoring factors (6-factor architecture)
+        
+        # Skills Score (35 points)
+        skills_result = ScoringService.calculate_skills_score(cv_id, job_offer_id, db)
+        skills_score = skills_result["skills_score"]
+        
+        # Experience Score (20 points)
+        experience_result = ScoringService.calculate_experience_score(cv_id, job_offer_id, db)
+        experience_score = experience_result["experience_score"]
+        
+        # Seniority Score (10 points)
+        seniority_result = ScoringService.calculate_seniority_score(cv_id, job_offer_id, db)
+        seniority_score = seniority_result["seniority_score"]
+        
+        # Semantic Similarity (15 points)
         try:
             semantic_sim = similarity_calculator.calculate_single_similarity(cv_id, job_offer_id, db)
         except ValueError as ve:
             raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(ve))
-
-        # 3. Build enriched summaries for LLM prompt
+        semantic_score = semantic_sim * 15.0  # Normalize 0-1 to 0-15
+        
+        # LLM Evaluation (10 points)
+        # Build enriched summaries for LLM prompt
         personal_info = db.query(PersonalInfo).filter_by(cv_id=cv_id).first()
         name = personal_info.full_name if personal_info else "Candidat"
         
@@ -96,37 +168,47 @@ class MatchingService:
         skills_list = [s[0] for s in cv_skills_rows]
         skills_str = ", ".join(skills_list) if skills_list else "Non spécifiées"
 
-        req_skills = job_offer.required_skills
-        if req_skills:
-            try:
-                # Parse JSON if it's stored as JSON string
-                parsed_skills = json.loads(req_skills)
-                if isinstance(parsed_skills, list):
-                    req_skills = ", ".join(parsed_skills)
-            except (json.JSONDecodeError, TypeError):
-                # If not JSON, use as-is
-                pass
-        else:
-            req_skills = "Non spécifiées"
+        # Explicit skills extraction from JobSkill / Skill (using canonical names)
+        job_skills_rows = (
+            db.query(Skill.canonical_name)
+            .join(JobSkill, JobSkill.skill_id == Skill.id)
+            .filter(JobSkill.job_offer_id == job_offer_id)
+            .all()
+        )
+        req_skills_list = [s[0] for s in job_skills_rows]
+        req_skills = ", ".join(req_skills_list) if req_skills_list else "Non spécifiées"
 
         cv_summary = f"Candidat: {name}. Compétences: {skills_str}. Expériences: {exp_summary}."
         job_summary = f"Titre: {job_offer.title}. Entreprise: {job_offer.company}. Lieu: {job_offer.location}. Compétences requises: {req_skills}. Description: {job_offer.description[:600]}"
 
-        # 3. Call LLM evaluator
+        # Call LLM evaluator
         assessment = llm_evaluator.evaluate(cv_summary, job_summary)
 
         matching_points = assessment.get("matching_points", [])
         gap_points = assessment.get("gap_points", [])
 
-        # 4. Use LLM score from assessment, fallback to heuristic if not provided
-        llm_score = float(assessment.get("score", MatchingService.compute_llm_score(matching_points, gap_points)))
+        # Use LLM score from assessment, normalize to 0-10
+        raw_score_val = assessment.get("score")
+        if raw_score_val is None:
+            raw_score_val = MatchingService.compute_llm_score(matching_points, gap_points)
+        llm_raw_score = float(raw_score_val)
+        # Defensive validation: ensure score is in valid range before normalization
+        llm_raw_score = max(0.0, min(100.0, llm_raw_score))
+        llm_score = (llm_raw_score / 100.0) * 10.0  # Normalize 0-100 to 0-10
+        
+        # Certification Bonus (0-5 points, capped)
+        certification_result = ScoringService.calculate_certification_bonus(cv_id, job_offer_id, db)
+        certification_bonus = certification_result["certification_bonus"]
+        
+        # Calculate base score (sum of 5 weighted factors)
+        base_score = skills_score + experience_score + seniority_score + semantic_score + llm_score
+        
+        # Apply certification bonus with strict cap
+        final_score = min(100.0, base_score + certification_bonus)
+        final_score = round(max(0.0, final_score), 2)
 
-        # 4. Calculate weighted compatibility score (0 to 100)
-        # compatibility_score = (semantic_sim * 100 * semantic_weight) + (llm_score * llm_weight)
-        comp_score = (semantic_sim * 100.0 * config.semantic_weight) + (llm_score * config.llm_weight)
-        comp_score = round(max(0.0, min(100.0, comp_score)), 2)
-
-        # 5. Upsert Match record
+        # 5. Upsert Match record with new 6-factor scoring
+        from sqlalchemy.exc import IntegrityError
         match = db.query(Match).filter_by(cv_id=cv_id, job_offer_id=job_offer_id).first()
         if not match:
             match = Match(
@@ -134,23 +216,75 @@ class MatchingService:
                 job_offer_id=job_offer_id,
                 semantic_similarity=round(semantic_sim, 4),
                 llm_score=llm_score,
-                compatibility_score=comp_score,
+                compatibility_score=final_score,
                 matching_points=assessment.get("matching_points", []),
                 gap_points=assessment.get("gap_points", []),
-                summary=assessment.get("summary", "")
+                summary=assessment.get("summary", ""),
+                # New 6-factor fields
+                skills_score=skills_score,
+                experience_score=experience_score,
+                seniority_score=seniority_score,
+                semantic_score=semantic_score,
+                certification_bonus=certification_bonus
             )
             db.add(match)
         else:
             match.semantic_similarity = round(semantic_sim, 4)
             match.llm_score = llm_score
-            match.compatibility_score = comp_score
+            match.compatibility_score = final_score
             match.matching_points = assessment.get("matching_points", [])
             match.gap_points = assessment.get("gap_points", [])
             match.summary = assessment.get("summary", "")
+            # Update new 6-factor fields
+            match.skills_score = skills_score
+            match.experience_score = experience_score
+            match.seniority_score = seniority_score
+            match.semantic_score = semantic_score
+            match.certification_bonus = certification_bonus
 
-        db.commit()
-        db.refresh(match)
+        try:
+            db.commit()
+            db.refresh(match)
+        except IntegrityError:
+            db.rollback()
+            match = db.query(Match).filter_by(cv_id=cv_id, job_offer_id=job_offer_id).first()
+            if match:
+                match.semantic_similarity = round(semantic_sim, 4)
+                match.llm_score = llm_score
+                match.compatibility_score = final_score
+                match.matching_points = assessment.get("matching_points", [])
+                match.gap_points = assessment.get("gap_points", [])
+                match.summary = assessment.get("summary", "")
+                match.skills_score = skills_score
+                match.experience_score = experience_score
+                match.seniority_score = seniority_score
+                match.semantic_score = semantic_score
+                match.certification_bonus = certification_bonus
+                db.commit()
+                db.refresh(match)
         return match
+    
+    @staticmethod
+    def invalidate_cv_matches(cv_id: uuid.UUID, db: Session):
+        """
+        Invalidate all matches for a CV when CV data is updated.
+        This ensures matches are recalculated with fresh data.
+        """
+        matches = db.query(Match).filter_by(cv_id=cv_id).all()
+        for match in matches:
+            db.delete(match)
+        db.commit()
+    
+    @staticmethod
+    def invalidate_job_matches(job_offer_id: uuid.UUID, db: Session):
+        """
+        Invalidate all matches for a job offer when job data is updated.
+        This ensures matches are recalculated with fresh data.
+        """
+        matches = db.query(Match).filter_by(job_offer_id=job_offer_id).all()
+        for match in matches:
+            db.delete(match)
+        db.commit()
 
     @staticmethod
     def get_best_matches_for_cv(
@@ -178,39 +312,44 @@ class MatchingService:
             )
 
         config = MatchingService.get_or_create_config(user_id, db)
+        
+        # Load user preferences for filtering (graceful degradation if not set)
+        prefs = db.query(UserPreferences).filter_by(user_id=user_id).first()
 
-        # Estimate minimum semantic similarity needed to reach threshold
-        # If semantic_weight is 0.6 and threshold is 70, minimum semantic is (70 - 0) / 0.6 / 100 = 0.7
-        min_semantic_threshold = 0.0
-        if config.semantic_weight > 0:
-            min_semantic_threshold = max(0.0, (config.threshold / 100.0 - config.llm_weight) / config.semantic_weight)
-        # Be slightly more lenient to account for LLM boosting potential
-        min_semantic_threshold = max(0.0, min_semantic_threshold - 0.1)
-
-        # Retrieve top vector candidates using SQL pgvector with pre-filtering
+        # Retrieve top vector candidates using SQL pgvector (no artificial cut-off).
+        # Semantic similarity is only one component of the 6-factor scoring, so we don't pre-filter.
         top_candidates = similarity_calculator.get_top_matching_job_offers(
             cv_id=cv_id,
             db=db,
-            limit=limit * 3,  # Fetch wider sample since we'll pre-filter
-            threshold=min_semantic_threshold
+            limit=limit * 3,  # Wider semantic candidate pool; existing matches reused for free
+            threshold=0.0
         )
+
+        # Cap new LLM evaluations per Discover request to avoid mass API usage.
+        # Existing Match rows are reused without any LLM call.
+        MAX_NEW_EVALUATIONS_PER_DISCOVER = 5
+        new_evaluations = 0
 
         results = []
         for job_offer_id, sim_score in top_candidates:
-            # Check if match already computed
+            # Reuse existing match — no LLM call needed
             match = db.query(Match).filter_by(cv_id=cv_id, job_offer_id=job_offer_id).first()
             if not match:
-                # Compute match on the fly for top candidate
+                # Only evaluate if we haven't hit the per-request cap
+                if new_evaluations >= MAX_NEW_EVALUATIONS_PER_DISCOVER:
+                    continue
                 try:
                     match = MatchingService.compute_match(
                         cv_id, job_offer_id, user_id, similarity_calculator, llm_evaluator, db
                     )
+                    new_evaluations += 1
                 except Exception as e:
+                    db.rollback()
                     print(f"[MatchingService] Skipping candidate match error: {e}")
                     continue
 
             job_offer = db.get(JobOffer, job_offer_id)
-            if match and job_offer and match.compatibility_score >= config.threshold:
+            if match and job_offer:
                 results.append((match, job_offer))
 
         # Sort descending by compatibility score

@@ -7,3 +7,21 @@ node_modules/
 backend/static/screenshots/
 backend/model_cache/
 *.png
+# Local test/database files
+backend/*.db
+backend/model_cache/
+
+# Backup directories
+frontend/*_backup/
+# Local databases
+backend/*.db
+
+# Model/cache files
+backend/model_cache/
+
+# Development backups
+frontend/app_backup/
+frontend/components_backup/
+frontend/context_backup/
+frontend/hooks_backup/
+frontend/lib_backup/

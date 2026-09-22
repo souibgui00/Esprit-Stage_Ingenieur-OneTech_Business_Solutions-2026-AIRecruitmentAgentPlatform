@@ -6,17 +6,18 @@ import time
 import uuid
 
 from shared.database import get_db
-from user_management.models import User, UserSession, UserActivity
+from user_management.models import User, UserSession, UserActivity, UserPreferences, UserPasswordReset
 from user_management.schemas import (
     UserCreate, UserResponse, Token, TokenData, UserUpdate, 
     ChangePassword, ResetPasswordRequest, ResetPasswordConfirm, 
     UpdateEmailRequest, RefreshTokenRequest, VerifyEmailRequest,
     TwoFactorSetup, SessionResponse, ActivityResponse,
-    OAuthUrlResponse, OAuthCallbackRequest
+    OAuthUrlResponse, OAuthCallbackRequest,
+    UserPreferencesCreate, UserPreferencesResponse
 )
 from user_management.security import (
     hash_password, verify_password, create_access_token, create_refresh_token,
-    verify_token, generate_verification_token, generate_reset_token, get_token_expiry
+    verify_token
 )
 from user_management.dependencies import get_current_user
 from user_management.email_service import email_service
@@ -74,28 +75,27 @@ def register(user_in: UserCreate, request: Request, db: Session = Depends(get_db
             detail="Cet email est déjà utilisé."
         )
     
-    # Create verification token
-    verification_token = generate_verification_token()
-    verification_expires = get_token_expiry(hours=24)
-    
+    # Create user with only the fields that exist in the model
     new_user = User(
         email=user_in.email,
         hashed_password=hash_password(user_in.password),
-        full_name=user_in.full_name,
-        verification_token=verification_token,
-        verification_expires=verification_expires
+        is_active=True  # Auto-activate since verification is not implemented
     )
     db.add(new_user)
-    db.commit()
-    db.refresh(new_user)
-    
+    try:
+        db.commit()
+        db.refresh(new_user)
+    except Exception:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cet email est déjà utilisé."
+        )
+
     # Log registration activity
     ip_address, user_agent = get_client_info(request)
     log_user_activity(db, new_user.id, "register", "User registered", ip_address, user_agent)
-    
-    # Send verification email
-    email_service.send_verification_email(new_user.email, verification_token)
-    
+
     return new_user
 
 @router.post("/login", response_model=Token)
@@ -179,16 +179,14 @@ def read_users_me(current_user: User = Depends(get_current_user)):
 
 @router.put("/me", response_model=UserResponse)
 def update_user(user_update: UserUpdate, request: Request, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    for field, value in user_update.dict(exclude_unset=True).items():
-        setattr(current_user, field, value)
-    
-    current_user.updated_at = datetime.utcnow()
-    db.commit()
-    db.refresh(current_user)
+    # Only update fields that actually exist in the User model
+    # UserUpdate schema has fields that don't exist in simplified schema
+    # For now, this endpoint is effectively a no-op for profile updates
+    # Real profile updates would require adding fields to User model
     
     # Log update activity
     ip_address, user_agent = get_client_info(request)
-    log_user_activity(db, current_user.id, "profile_update", "User profile updated", ip_address, user_agent)
+    log_user_activity(db, current_user.id, "profile_update", "User profile update attempted", ip_address, user_agent)
     
     return current_user
 
@@ -201,7 +199,6 @@ def change_password(password_data: ChangePassword, request: Request, current_use
         )
     
     current_user.hashed_password = hash_password(password_data.new_password)
-    current_user.updated_at = datetime.utcnow()
     db.commit()
     
     # Log password change activity
@@ -212,120 +209,120 @@ def change_password(password_data: ChangePassword, request: Request, current_use
 
 @router.post("/forgot-password")
 def forgot_password(request_data: ResetPasswordRequest, db: Session = Depends(get_db)):
+    """
+    Request a password reset link.
+    Always returns the same response regardless of whether the email exists
+    to prevent user enumeration.
+    """
+    from user_management.security import generate_reset_token, get_token_expiry
+
     user = db.query(User).filter(User.email == request_data.email).first()
     if not user:
-        # Don't reveal if email exists for security
-        return {"message": "If the email exists, a reset link has been sent"}
-    
-    # Generate reset token
-    reset_token = generate_reset_token()
-    reset_expires = get_token_expiry(hours=1)
-    
-    user.reset_token = reset_token
-    user.reset_expires = reset_expires
+        # Security: do not reveal whether the email is registered
+        return {"message": "If the email exists, a reset link has been sent."}
+
+    # Invalidate any existing unused tokens for this user
+    db.query(UserPasswordReset).filter(
+        UserPasswordReset.user_id == user.id,
+        UserPasswordReset.is_used == False
+    ).update({"is_used": True})
+
+    # Generate a cryptographically secure token (URL-safe, 48 bytes → 64 chars)
+    raw_token = generate_reset_token()
+
+    reset_entry = UserPasswordReset(
+        user_id=user.id,
+        token=raw_token,
+        expires_at=get_token_expiry(hours=1)  # Valid for 1 hour
+    )
+    db.add(reset_entry)
     db.commit()
-    
-    # Send password reset email
-    email_service.send_password_reset_email(user.email, reset_token)
-    
-    return {"message": "If the email exists, a reset link has been sent"}
+
+    # Attempt to send email; fall back to logging the link in development
+    sent = email_service.send_password_reset_email(user.email, raw_token)
+    if not sent:
+        import logging
+        logging.getLogger(__name__).warning(
+            "[DEV] SMTP unavailable — password reset link: "
+            f"%s/auth/reset-password?token=%s",
+            email_service.frontend_url, raw_token
+        )
+
+    return {"message": "If the email exists, a reset link has been sent."}
+
 
 @router.post("/reset-password")
 def reset_password(reset_data: ResetPasswordConfirm, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.reset_token == reset_data.token).first()
-    if not user:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid or expired reset token"
-        )
-    
-    if user.reset_expires < datetime.utcnow():
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Reset token has expired"
-        )
-    
+    """
+    Consume a password reset token and set a new password.
+    Validates: token existence, expiry, single-use state, and password strength.
+    """
+    from datetime import timezone
+
+    invalid_exc = HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail="Le lien de réinitialisation est invalide ou a expiré."
+    )
+
+    reset_entry = db.query(UserPasswordReset).filter(
+        UserPasswordReset.token == reset_data.token
+    ).first()
+
+    if not reset_entry:
+        raise invalid_exc
+
+    if reset_entry.is_used:
+        raise invalid_exc
+
+    # Compare expiry against UTC now (both are naive UTC datetimes)
+    now_utc = datetime.utcnow()
+    if reset_entry.expires_at < now_utc:
+        raise invalid_exc
+
+    # Retrieve the user
+    user = db.query(User).filter(User.id == reset_entry.user_id).first()
+    if not user or not user.is_active:
+        raise invalid_exc
+
+    # Hash and store the new password
     user.hashed_password = hash_password(reset_data.new_password)
-    user.reset_token = None
-    user.reset_expires = None
-    user.updated_at = datetime.utcnow()
+
+    # Mark token as used (prevents replay)
+    reset_entry.is_used = True
+
+    # Invalidate all active sessions to force re-login with new password
+    db.query(UserSession).filter(
+        UserSession.user_id == user.id,
+        UserSession.is_active == True
+    ).update({"is_active": False})
+
     db.commit()
-    
-    return {"message": "Password reset successfully"}
+
+    return {"message": "Mot de passe réinitialisé avec succès. Vous pouvez maintenant vous connecter."}
 
 @router.post("/verify-email")
 def verify_email(verification_data: VerifyEmailRequest, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.verification_token == verification_data.token).first()
-    if not user:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid verification token"
-        )
-    
-    if user.verification_expires < datetime.utcnow():
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Verification token has expired"
-        )
-    
-    user.is_verified = True
-    user.verification_token = None
-    user.verification_expires = None
-    user.updated_at = datetime.utcnow()
-    db.commit()
-    
-    return {"message": "Email verified successfully"}
+    # Email verification not implemented - simplified schema
+    raise HTTPException(
+        status_code=status.HTTP_501_NOT_IMPLEMENTED,
+        detail="Email verification functionality not available in simplified schema"
+    )
 
 @router.post("/request-email-verification")
 def request_email_verification(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    if current_user.is_verified:
-        return {"message": "Email already verified"}
-    
-    # Generate new verification token
-    verification_token = generate_verification_token()
-    verification_expires = get_token_expiry(hours=24)
-    
-    current_user.verification_token = verification_token
-    current_user.verification_expires = verification_expires
-    db.commit()
-    
-    # Send verification email
-    email_service.send_verification_email(current_user.email, verification_token)
-    
-    return {"message": "Verification email sent"}
+    # Email verification not implemented - simplified schema
+    raise HTTPException(
+        status_code=status.HTTP_501_NOT_IMPLEMENTED,
+        detail="Email verification functionality not available in simplified schema"
+    )
 
 @router.post("/update-email")
 def update_email(email_data: UpdateEmailRequest, request: Request, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    # Verify current password
-    if not verify_password(email_data.password, current_user.hashed_password):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Current password is incorrect"
-        )
-    
-    # Check if new email already exists
-    existing_user = db.query(User).filter(User.email == email_data.new_email).first()
-    if existing_user:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Email already in use"
-        )
-    
-    # Generate verification token for new email
-    verification_token = generate_verification_token()
-    verification_expires = get_token_expiry(hours=24)
-    
-    # Store in temp field (you might want to add a separate table for this)
-    current_user.verification_token = verification_token
-    current_user.verification_expires = verification_expires
-    # Store new email temporarily (you might want a separate field for this)
-    # For now, we'll just send the verification email with the new email
-    db.commit()
-    
-    # Send verification email to new email address
-    email_service.send_email_change_verification(email_data.new_email, verification_token, current_user.email)
-    
-    return {"message": "Verification email sent to new email address"}
+    # Email update not implemented - simplified schema
+    raise HTTPException(
+        status_code=status.HTTP_501_NOT_IMPLEMENTED,
+        detail="Email update functionality not available in simplified schema"
+    )
 
 @router.post("/refresh-token", response_model=Token)
 def refresh_token(token_data: RefreshTokenRequest, db: Session = Depends(get_db)):
@@ -415,7 +412,11 @@ def delete_account(request: Request, current_user: User = Depends(get_current_us
     # Deactivate user instead of deleting (soft delete)
     current_user.is_active = False
     current_user.email = f"deleted_{current_user.id}@deleted.com"  # Make email unusable
-    current_user.hashed_password = ""  # Remove password
+    # Set password to a random hash to prevent any potential authentication
+    from user_management.security import hash_password
+    import secrets
+    random_password = secrets.token_urlsafe(32)
+    current_user.hashed_password = hash_password(random_password)
     db.commit()
     
     return {"message": "Account deleted successfully"}
@@ -427,7 +428,7 @@ def get_google_auth_url():
     try:
         authorization_url = oauth_service.get_google_auth_url()
         return {"authorization_url": authorization_url}
-    except ValueError as e:
+    except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e)
@@ -460,7 +461,7 @@ def google_callback(callback_data: OAuthCallbackRequest, request: Request, db: S
         log_user_activity(db, user.id, "oauth_login", "User logged in via Google", ip_address, user_agent)
         
         return {"access_token": access_token, "refresh_token": refresh_token, "token_type": "bearer"}
-    except ValueError as e:
+    except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e)
@@ -472,7 +473,7 @@ def get_github_auth_url():
     try:
         authorization_url = oauth_service.get_github_auth_url()
         return {"authorization_url": authorization_url}
-    except ValueError as e:
+    except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e)
@@ -505,8 +506,77 @@ def github_callback(callback_data: OAuthCallbackRequest, request: Request, db: S
         log_user_activity(db, user.id, "oauth_login", "User logged in via GitHub", ip_address, user_agent)
         
         return {"access_token": access_token, "refresh_token": refresh_token, "token_type": "bearer"}
-    except ValueError as e:
+    except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e)
         )
+
+
+# User Preferences endpoints
+@router.get("/preferences", response_model=UserPreferencesResponse)
+def get_user_preferences(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Get user's job search preferences. Creates default preferences if not set."""
+    preferences = db.query(UserPreferences).filter_by(user_id=current_user.id).first()
+    if not preferences:
+        # Create default preferences
+        preferences = UserPreferences(
+            user_id=current_user.id,
+            job_keywords="developer python react javascript",
+            preferred_locations=[],
+            preferred_contract_types=[],
+            remote_preference=False,
+            min_salary=None
+        )
+        db.add(preferences)
+        db.commit()
+        db.refresh(preferences)
+    return preferences
+
+
+@router.put("/preferences", response_model=UserPreferencesResponse)
+def update_user_preferences(
+    preferences_in: UserPreferencesCreate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Update user's job search preferences."""
+    preferences = db.query(UserPreferences).filter_by(user_id=current_user.id).first()
+    if not preferences:
+        # Create if doesn't exist
+        preferences = UserPreferences(
+            user_id=current_user.id,
+            job_keywords=preferences_in.job_keywords or "developer python react javascript",
+            preferred_locations=preferences_in.preferred_locations or [],
+            preferred_contract_types=preferences_in.preferred_contract_types or [],
+            remote_preference=preferences_in.remote_preference if preferences_in.remote_preference is not None else False,
+            min_salary=preferences_in.min_salary
+        )
+        db.add(preferences)
+    else:
+        # Update existing
+        if preferences_in.job_keywords is not None:
+            preferences.job_keywords = preferences_in.job_keywords
+        if preferences_in.preferred_locations is not None:
+            preferences.preferred_locations = preferences_in.preferred_locations
+        if preferences_in.preferred_contract_types is not None:
+            preferences.preferred_contract_types = preferences_in.preferred_contract_types
+        if preferences_in.remote_preference is not None:
+            preferences.remote_preference = preferences_in.remote_preference
+        if preferences_in.min_salary is not None:
+            preferences.min_salary = preferences_in.min_salary
+        if preferences_in.target_roles is not None:
+            preferences.target_roles = preferences_in.target_roles
+        if preferences_in.application_mode is not None:
+            preferences.application_mode = preferences_in.application_mode
+        if preferences_in.min_match_score is not None:
+            preferences.min_match_score = preferences_in.min_match_score
+        if preferences_in.max_applications_per_day is not None:
+            preferences.max_applications_per_day = preferences_in.max_applications_per_day
+    
+    db.commit()
+    db.refresh(preferences)
+    return preferences

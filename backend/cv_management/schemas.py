@@ -51,6 +51,17 @@ class SkillResponse(BaseModel):
         from_attributes = True
 
 
+class CertificationResponse(BaseModel):
+    id: uuid.UUID
+    name: str
+    issuer: str | None = None
+    date_obtained: date | None = None
+    expiry_date: date | None = None
+
+    class Config:
+        from_attributes = True
+
+
 class CVResponse(BaseModel):
     id: uuid.UUID
     filename: str | None = None
@@ -65,26 +76,34 @@ class CVResponse(BaseModel):
     experiences: List[ExperienceResponse] = []
     educations: List[EducationResponse] = []
     skills: List[SkillResponse] = []
+    certifications: List[CertificationResponse] = []
 
     class Config:
         from_attributes = True
 
 
 class ExperienceData(BaseModel):
-    title: str
-    company: str
-    start_date: str
+    title: str | None = None
+    company: str | None = None
+    start_date: str | None = None
     end_date: str | None = None
     description: str | None = None
     is_current: bool = False
 
 
 class EducationData(BaseModel):
-    degree: str
-    institution: str
+    degree: str | None = None
+    institution: str | None = None
     field: str | None = None
-    start_date: str
+    start_date: str | None = None
     end_date: str | None = None
+
+
+class CertificationData(BaseModel):
+    name: str | None = None
+    issuer: str | None = None
+    date_obtained: str | None = None
+    expiry_date: str | None = None
 
 
 class ParsedCVData(BaseModel):
@@ -95,3 +114,4 @@ class ParsedCVData(BaseModel):
     experiences: list[ExperienceData] = []
     education: list[EducationData] = []
     skills: list[str] = []
+    certifications: list[CertificationData] = []

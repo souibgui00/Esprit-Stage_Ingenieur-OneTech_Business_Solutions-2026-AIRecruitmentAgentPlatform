@@ -13,6 +13,9 @@ class BasePlatformAgent(abc.ABC):
     Includes AI-powered helpers for intelligent form filling.
     """
 
+    def __init__(self):
+        self.groq_model = os.environ.get("GROQ_MODEL", "openai/gpt-oss-20b")
+
     # ──────────────────────────────────────────────────────────────
     # Abstract methods (must be implemented by subclasses)
     # ──────────────────────────────────────────────────────────────
@@ -33,11 +36,15 @@ class BasePlatformAgent(abc.ABC):
         cover_letter: str,
         skills: List[str],
         experiences: List[Any],
-        add_log
-    ) -> bool:
+        add_log,
+        user_responses: Optional[Dict[str, str]] = None
+    ) -> dict:
         """
         Attempts to locate and fill all required application fields on the page.
-        Returns True if at least some fields were filled successfully.
+        Returns a dict with:
+        - 'success': bool - if at least some fields were filled successfully
+        - 'pending_questions': list - structured pending questions that need user input
+        When user_responses is provided, use those answers instead of asking LLM.
         """
         pass
 
@@ -82,7 +89,7 @@ class BasePlatformAgent(abc.ABC):
                 from groq import Groq
                 client = Groq(api_key=api_key)
                 response = client.chat.completions.create(
-                    model="llama-3.3-70b-versatile",
+                    model=self.groq_model,
                     messages=[
                         {"role": "user", "content": f"Extract ONLY the LinkedIn profile URL from this text. Return ONLY the URL, nothing else. If not found, return 'NONE'.\n\n{cv_text[:3000]}"}
                     ],
@@ -149,7 +156,7 @@ INSTRUCTIONS:
 ANSWER:"""
 
             response = client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
+                model=self.groq_model,
                 messages=[
                     {"role": "system", "content": "You answer job application form questions on behalf of candidates. Be concise, professional, and accurate."},
                     {"role": "user", "content": prompt}
@@ -193,7 +200,7 @@ Choose the BEST option for this candidate. Return ONLY the exact text of the cho
 CHOSEN OPTION:"""
 
             response = client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
+                model=self.groq_model,
                 messages=[
                     {"role": "user", "content": prompt}
                 ],
@@ -209,6 +216,94 @@ CHOSEN OPTION:"""
         except Exception as e:
             logger.warning(f"LLM ask_llm_choose_option failed: {e}")
             return options[0] if options else ""
+
+    # ──────────────────────────────────────────────────────────────
+    # Pending question tracking (shared across all agents)
+    # ──────────────────────────────────────────────────────────────
+
+    def _build_pending_question(
+        self,
+        field_id: str,
+        label: str,
+        field_type: str,
+        required: bool = True,
+        options: Optional[List[str]] = None
+    ) -> Dict[str, Any]:
+        """
+        Build a structured pending question object.
+        """
+        return {
+            "id": field_id,
+            "label": label,
+            "type": field_type,
+            "required": required,
+            "options": options or []
+        }
+
+    def _get_field_id(self, element) -> str:
+        """
+        Generate a stable ID for a form element based on its attributes.
+        """
+        try:
+            name = element.get_attribute("name") or ""
+            id_attr = element.get_attribute("id") or ""
+            placeholder = element.get_attribute("placeholder") or ""
+            
+            # Use name if available, then id, then placeholder
+            if name:
+                return name.replace(" ", "_").lower()
+            elif id_attr:
+                return id_attr.replace(" ", "_").lower()
+            elif placeholder:
+                return placeholder.replace(" ", "_").lower()[:30]
+            else:
+                # Fallback to a hash based on position
+                return f"field_{id(element)}"
+        except Exception:
+            return f"field_{id(element)}"
+
+    def _is_field_required(self, element) -> bool:
+        """Check if a form field is marked as required."""
+        try:
+            if element.get_attribute("required"):
+                return True
+            class_attr = element.get_attribute("class") or ""
+            if "required" in class_attr.lower():
+                return True
+            if element.get_attribute("aria-required") == "true":
+                return True
+            try:
+                # Check labels or nearby text for asterisk or 'erforderlich' or 'required'
+                label_text = element.evaluate("""el => {
+                    const labels = el.labels;
+                    if (labels && labels.length > 0) return labels[0].textContent;
+                    if (el.id) {
+                        const l = document.querySelector('label[for="' + el.id + '"]');
+                        if (l) return l.textContent;
+                    }
+                    const p = el.closest('label') || el.closest('.field') || el.parentElement;
+                    return p ? p.textContent : '';
+                }""")
+                if label_text and any(req in label_text.lower() for req in ["*", "erforderlich", "required", "obligatoire"]):
+                    return True
+            except Exception:
+                pass
+            return False
+        except Exception:
+            return False
+
+    def _is_radio_group_required(self, form_ctx, question_text: str) -> bool:
+        """Check if a radio button group is required."""
+        try:
+            radio_elements = form_ctx.query_selector_all("input[type='radio']")
+            for radio in radio_elements:
+                if self._is_field_required(radio):
+                    return True
+            if any(req in question_text.lower() for req in ["*", "erforderlich", "required", "obligatoire"]):
+                return True
+            return False
+        except Exception:
+            return False
 
     # ──────────────────────────────────────────────────────────────
     # Blocking detection (shared across all agents)
@@ -258,3 +353,25 @@ CHOSEN OPTION:"""
             pass
 
         return None
+
+    def take_resilient_screenshot(self, page, abs_path: str, screenshot_dict: dict, label: str, add_log) -> bool:
+        """
+        Take a screenshot with timeout protection and fallback logic.
+        Returns True if successful, False otherwise.
+        """
+        try:
+            # Try full_page screenshot first with 60s timeout
+            page.screenshot(path=abs_path, full_page=True, timeout=60000)
+            screenshot_dict[label] = f"/static/{label}"
+            return True
+        except Exception as e:
+            add_log("SCREENSHOT", f"Full-page screenshot failed for {label}: {str(e)[:100]}", "WARNING")
+            try:
+                # Fallback to non-full-page screenshot
+                page.screenshot(path=abs_path, timeout=60000)
+                screenshot_dict[label] = f"/static/{label}"
+                add_log("SCREENSHOT", f"Non-full-page screenshot succeeded for {label}", "SUCCESS")
+                return True
+            except Exception as e2:
+                add_log("SCREENSHOT", f"Screenshot completely failed for {label}: {str(e2)[:100]}", "WARNING")
+                return False

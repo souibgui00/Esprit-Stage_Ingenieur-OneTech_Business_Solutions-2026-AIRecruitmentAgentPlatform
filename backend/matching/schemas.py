@@ -16,15 +16,23 @@ class MatchAssessmentData(BaseModel):
 
 class MatchResponse(BaseModel):
     """
-    API Response schema for a Match object.
+    API Response schema for a Match object with 6-factor scoring.
     """
     id: uuid.UUID
     cv_id: uuid.UUID
     job_offer_id: uuid.UUID
 
+    # Original fields (for backward compatibility)
     semantic_similarity: float
     llm_score: float
     compatibility_score: float
+
+    # New 6-factor scoring components
+    skills_score: float = 0.0
+    experience_score: float = 0.0
+    seniority_score: float = 0.0
+    semantic_score: float = 0.0
+    certification_bonus: float = 0.0
 
     matching_points: List[str]
     gap_points: List[str]
@@ -42,12 +50,10 @@ class MatchResponse(BaseModel):
 class MatchingConfigResponse(BaseModel):
     """
     API Response schema for MatchingConfig.
+    The 6-factor scoring uses fixed weights and does not require user configuration.
     """
     id: uuid.UUID
     user_id: uuid.UUID
-    threshold: float
-    semantic_weight: float
-    llm_weight: float
 
     class Config:
         from_attributes = True
@@ -56,15 +62,7 @@ class MatchingConfigResponse(BaseModel):
 class MatchingConfigUpdate(BaseModel):
     """
     Request payload to update MatchingConfig.
+    The 6-factor scoring uses fixed weights, so no configuration fields are currently needed.
+    This schema is kept for API compatibility but does not process any fields.
     """
-    threshold: Optional[float] = Field(None, ge=0.0, le=100.0)
-    semantic_weight: Optional[float] = Field(None, ge=0.0, le=1.0)
-    llm_weight: Optional[float] = Field(None, ge=0.0, le=1.0)
-
-    @model_validator(mode="after")
-    def validate_weights(self):
-        if self.semantic_weight is not None and self.llm_weight is not None:
-            total = round(self.semantic_weight + self.llm_weight, 4)
-            if total != 1.0:
-                raise ValueError(f"The sum of semantic_weight ({self.semantic_weight}) and llm_weight ({self.llm_weight}) must equal 1.0")
-        return self
+    pass

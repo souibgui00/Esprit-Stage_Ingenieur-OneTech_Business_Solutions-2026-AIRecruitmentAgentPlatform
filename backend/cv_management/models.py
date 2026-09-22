@@ -1,8 +1,9 @@
 import uuid
 from datetime import datetime, date
 from typing import Optional
+from enum import Enum as PyEnum
 
-from sqlalchemy import String, DateTime, Date, ForeignKey, Boolean
+from sqlalchemy import String, DateTime, Date, ForeignKey, Boolean, Enum as SqlEnum
 from sqlalchemy.orm import Mapped, mapped_column
 from pgvector.sqlalchemy import Vector
 from shared.base import Base
@@ -14,8 +15,6 @@ class Skill(Base):
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     canonical_name: Mapped[str] = mapped_column(String(100), unique=True)
     category: Mapped[str] = mapped_column(String(50))
-from enum import Enum as PyEnum
-from sqlalchemy import Enum as SqlEnum
 
 class CVStatus(str, PyEnum):
     UPLOADED = "UPLOADED"
@@ -66,16 +65,12 @@ class CV(Base):
         )
         return cv_skill
 
-    def get_total_years_of_experience(self) -> float:
-        # Simplistic approach if we were to compute it on the fly, but for now we'll just return 0.0 or compute from experiences if loaded
-        return 0.0
-
 
 class Experience(Base):
     __tablename__ = "experiences"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
-    cv_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("cvs.id"))
+    cv_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("cvs.id", ondelete="CASCADE"))
     title: Mapped[str] = mapped_column(String(200))
     company: Mapped[str] = mapped_column(String(200))
     start_date: Mapped[date] = mapped_column(Date)
@@ -88,7 +83,7 @@ class Education(Base):
     __tablename__ = "educations"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
-    cv_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("cvs.id"))
+    cv_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("cvs.id", ondelete="CASCADE"))
     degree: Mapped[str] = mapped_column(String(200))
     institution: Mapped[str] = mapped_column(String(200))
     field: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
@@ -100,7 +95,7 @@ class Certification(Base):
     __tablename__ = "certifications"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
-    cv_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("cvs.id"))
+    cv_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("cvs.id", ondelete="CASCADE"))
     name: Mapped[str] = mapped_column(String(200))
     issuer: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
     date_obtained: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
@@ -111,7 +106,7 @@ class PersonalInfo(Base):
     __tablename__ = "personal_infos"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
-    cv_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("cvs.id"), unique=True)
+    cv_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("cvs.id", ondelete="CASCADE"), unique=True)
     full_name: Mapped[str] = mapped_column(String(200))
     email: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
     phone: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
@@ -125,7 +120,7 @@ class CVEmbedding(Base):
     __tablename__ = "cv_embeddings"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
-    cv_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("cvs.id"), unique=True)
+    cv_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("cvs.id", ondelete="CASCADE"), unique=True)
     vector: Mapped[list[float]] = mapped_column(Vector(1024))
     model_name: Mapped[str] = mapped_column(String(100))
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
@@ -135,8 +130,8 @@ class CVSkill(Base):
     __tablename__ = "cv_skills"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
-    cv_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("cvs.id"))
-    skill_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("skills.id"))
+    cv_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("cvs.id", ondelete="CASCADE"))
+    skill_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("skills.id", ondelete="CASCADE"))
     years_experience: Mapped[Optional[float]] = mapped_column(nullable=True)
     proficiency: Mapped[str] = mapped_column(String(20))
     source: Mapped[str] = mapped_column(String(20))

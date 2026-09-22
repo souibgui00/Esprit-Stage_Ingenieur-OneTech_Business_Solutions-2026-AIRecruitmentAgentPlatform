@@ -9,6 +9,8 @@ from shared.base import Base
 class NotificationType(str, PyEnum):
     APPLICATION_SENT = "APPLICATION_SENT"
     APPLICATION_FAILED = "APPLICATION_FAILED"
+    NEW_MATCH = "NEW_MATCH"
+    ACTION_REQUIRED = "ACTION_REQUIRED"
 
 class Notification(Base):
     __tablename__ = "notifications"

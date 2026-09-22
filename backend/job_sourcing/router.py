@@ -1,7 +1,7 @@
 import uuid
 from typing import List, Optional
 from datetime import datetime
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, status
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, status, Query
 from sqlalchemy.orm import Session
 
 from shared.database import get_db
@@ -15,6 +15,7 @@ from job_sourcing.schemas import (
     CollectionRunResponse
 )
 from job_sourcing.services.collection_service import JobCollectionService
+from matching.matching_service import MatchingService
 # Import connectors package to trigger registration on boot
 import job_sourcing.connectors 
 
@@ -85,6 +86,7 @@ def list_collection_runs(db: Session = Depends(get_db)):
 
 @router.get("/offers", response_model=List[JobOfferResponse])
 def list_job_offers(
+    search: Optional[str] = Query(None, min_length=1, max_length=120),
     contract_type: Optional[ContractType] = None,
     location: Optional[str] = None,
     company: Optional[str] = None,
@@ -102,6 +104,14 @@ def list_job_offers(
     latest_cv = db.query(CV).filter_by(user_id=current_user.id).order_by(CV.created_at.desc()).first()
     
     query = db.query(JobOffer)
+
+    if search:
+        term = f"%{search.strip()}%"
+        query = query.filter(
+            (JobOffer.title.ilike(term)) |
+            (JobOffer.company.ilike(term)) |
+            (JobOffer.description.ilike(term))
+        )
     
     if contract_type:
         query = query.filter(JobOffer.contract_type == contract_type)

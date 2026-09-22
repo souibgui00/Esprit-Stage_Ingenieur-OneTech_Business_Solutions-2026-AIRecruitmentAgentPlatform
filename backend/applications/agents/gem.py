@@ -1,7 +1,7 @@
 import time
 import os
 import json
-from typing import List, Any
+from typing import List, Any, Dict, Optional
 from applications.agents.base import BasePlatformAgent
 
 
@@ -71,8 +71,9 @@ class GemAgent(BasePlatformAgent):
         cover_letter: str,
         skills: List[str],
         experiences: List[Any],
-        add_log
-    ) -> bool:
+        add_log,
+        user_responses: Optional[Dict[str, str]] = None
+    ) -> dict:
         add_log("FILL_GEM", "Formulaire Gem détecté. Localisation du contexte...")
         fields_filled = 0
 
@@ -480,7 +481,7 @@ class GemAgent(BasePlatformAgent):
         time.sleep(1)
 
         add_log("FILL_GEM", f"Remplissage terminé : {fields_filled} champ(s) rempli(s).", "SUCCESS" if fields_filled > 0 else "WARNING")
-        return fields_filled > 0
+        return {"success": fields_filled > 0, "pending_questions": []}
 
     # ──────────────────────────────────────────────────────────────
     # Submit form

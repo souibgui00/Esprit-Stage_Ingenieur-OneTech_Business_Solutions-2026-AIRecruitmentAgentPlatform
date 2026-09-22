@@ -21,8 +21,15 @@ class Match(Base):
     job_offer_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("job_offers.id", ondelete="CASCADE"), index=True)
 
     semantic_similarity: Mapped[float] = mapped_column(Float)  # Cosine similarity (0.0 to 1.0)
-    llm_score: Mapped[float] = mapped_column(Float, default=0.0)  # Qualitative LLM score (0.0 to 100.0)
+    llm_score: Mapped[float] = mapped_column(Float, default=0.0)  # Qualitative LLM score (0.0 to 10.0)
     compatibility_score: Mapped[float] = mapped_column(Float)  # Combined weighted score (0.0 to 100.0)
+
+    # 6-factor scoring components
+    skills_score: Mapped[float] = mapped_column(Float, default=0.0)  # Skills matching (0.0 to 35.0)
+    experience_score: Mapped[float] = mapped_column(Float, default=0.0)  # Experience relevance (0.0 to 20.0)
+    seniority_score: Mapped[float] = mapped_column(Float, default=0.0)  # Seniority alignment (0.0 to 10.0)
+    semantic_score: Mapped[float] = mapped_column(Float, default=0.0)  # Normalized semantic (0.0 to 15.0)
+    certification_bonus: Mapped[float] = mapped_column(Float, default=0.0)  # Certification bonus (0.0 to 5.0)
 
     matching_points: Mapped[Any] = mapped_column(JSON, default=list)  # Strengths / matching skills
     gap_points: Mapped[Any] = mapped_column(JSON, default=list)  # Missing skills / areas for growth
@@ -33,13 +40,11 @@ class Match(Base):
 
 class MatchingConfig(Base):
     """
-    Per-user matching preference configuration (weights & threshold).
+    Per-user matching preference configuration.
+    Currently reserved for future matching-related preferences.
+    The 6-factor scoring uses fixed weights and does not require user configuration.
     """
     __tablename__ = "matching_configs"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), unique=True, index=True)
-
-    threshold: Mapped[float] = mapped_column(Float, default=70.0)  # Minimum score threshold for matching recommendations
-    semantic_weight: Mapped[float] = mapped_column(Float, default=0.6)  # Weight of vector similarity (0.0 to 1.0)
-    llm_weight: Mapped[float] = mapped_column(Float, default=0.4)  # Weight of LLM qualitative score (0.0 to 1.0)

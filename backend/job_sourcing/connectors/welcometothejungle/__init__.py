@@ -1,1 +1,0 @@
-# WTTJ connector package

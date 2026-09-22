@@ -1,7 +1,7 @@
 import re
 import time
 import os
-from typing import List, Any
+from typing import List, Any, Dict, Optional
 from applications.agents.base import BasePlatformAgent
 
 
@@ -50,8 +50,9 @@ class GreenhouseAgent(BasePlatformAgent):
         cover_letter: str,
         skills: List[str],
         experiences: List[Any],
-        add_log
-    ) -> bool:
+        add_log,
+        user_responses: Optional[Dict[str, str]] = None
+    ) -> dict:
         add_log("FILL_GREENHOUSE", "Début du remplissage intelligent du formulaire Greenhouse...", "INFO")
         form_ctx = self._get_form_context(page, add_log)
 
@@ -88,6 +89,7 @@ class GreenhouseAgent(BasePlatformAgent):
             github_url = self.extract_github(cv_text)
 
         fields_filled = 0
+        pending_questions = []
 
         # ══════════════════════════════════════════════════════════
         # PHASE 1: Scan all form fields via JavaScript
@@ -237,61 +239,115 @@ class GreenhouseAgent(BasePlatformAgent):
             # ── Handle AUTOCOMPLETE/COMBOBOX fields (Country, City, Yes/No dropdowns) ──
             if is_autocomplete:
                 value = None
-                if 'country' in label_lower:
-                    value = "Tunisia"
-                elif 'location' in label_lower or 'city' in label_lower:
-                    value = "Tunis"
-                elif 'authoris' in label_lower or 'authorized' in label_lower or 'work permit' in label_lower:
-                    value = self.ask_llm(label, cv_text, cover_letter)
-                elif 'available' in label_lower or 'office' in label_lower:
-                    value = self.ask_llm(label, cv_text, cover_letter)
+                # Check if user provided an answer
+                field_id = self._get_field_id(el)
+                if user_responses and field_id in user_responses:
+                    value = user_responses[field_id]
+                    add_log("FILL_GREENHOUSE", f"✅ Utilisation de la réponse utilisateur pour : {field_id}", "SUCCESS")
                 else:
-                    value = self.ask_llm(label, cv_text, cover_letter)
+                    if 'country' in label_lower:
+                        value = "Tunisia"
+                    elif 'location' in label_lower or 'city' in label_lower:
+                        value = "Tunis"
+                    elif any(w in label_lower for w in ['privacy', 'notice', 'consent', 'policy', 'terms', 'rgpd', 'gdpr', 'read and understood']):
+                        value = "I confirm"
+                    elif 'authoris' in label_lower or 'authorized' in label_lower or 'work permit' in label_lower:
+                        value = self.ask_llm(label, cv_text, cover_letter)
+                    elif 'available' in label_lower or 'office' in label_lower:
+                        value = self.ask_llm(label, cv_text, cover_letter)
+                    else:
+                        value = self.ask_llm(label, cv_text, cover_letter)
 
                 if not value or value.lower() in ("none", "n/a", ""):
+                    # Check if this is an important field that needs user input
+                    is_required = self._is_field_required(el)
+                    important_keywords = ["country", "location", "city", "authoris", "authorized", "work permit", "available", "office"]
+                    if is_required or any(keyword in label_lower for keyword in important_keywords):
+                        pending_questions.append(self._build_pending_question(field_id, label, "text", is_required))
+                        add_log("FILL_GREENHOUSE", f"⚠️ Question en attente : {label}", "WARNING")
                     continue
 
-                try:
-                    # Click → clear → type to trigger the dropdown
-                    el.click(timeout=2000)
-                    time.sleep(0.3)
-                    el.fill("", timeout=1000)  # Clear existing
-                    time.sleep(0.2)
-                    el.type(value, delay=50, timeout=5000)
-                    time.sleep(1)  # Wait for dropdown options to appear
+                option_clicked = False
 
-                    # Try to click the first visible dropdown option
-                    option_clicked = False
-                    option_selectors = [
-                        f"div[role='option']", "li[role='option']",
-                        ".ss-option", ".select__option",
-                        "div.option", "ul.options li",
-                        "[class*='option']:not([class*='hidden'])"
-                    ]
-                    for opt_sel in option_selectors:
-                        try:
-                            opts = form_ctx.query_selector_all(opt_sel)
-                            for opt in opts:
-                                try:
-                                    if opt.is_visible():
-                                        opt.click(timeout=1000)
-                                        option_clicked = True
+                # 1. Attempt to reveal options via ArrowDown (standard React-Select behavior)
+                if 'country' not in label_lower:
+                    try:
+                        el.focus()
+                        form_ctx.keyboard.press("ArrowDown")
+                        time.sleep(0.3)
+                        opts = form_ctx.query_selector_all(".select__option, div[role='option'], li[role='option']")
+                        visible_opts = [o for o in opts if o.is_visible()]
+                        if visible_opts:
+                            target_opt = None
+                            if any(w in label_lower for w in ['privacy', 'notice', 'consent', 'policy', 'terms', 'read and understood']):
+                                for o in visible_opts:
+                                    ot = o.inner_text().lower()
+                                    if any(w in ot for w in ['confirm', 'agree', 'yes', 'read', 'accept', 'understood']):
+                                        target_opt = o
                                         break
-                                except Exception:
-                                    continue
-                            if option_clicked:
-                                break
-                        except Exception:
-                            continue
+                                if not target_opt and len(visible_opts) == 1:
+                                    target_opt = visible_opts[0]
+                            elif value:
+                                val_lower = str(value).lower().strip()
+                                for o in visible_opts:
+                                    ot = o.inner_text().lower().strip()
+                                    if val_lower == ot or val_lower in ot or ot in val_lower:
+                                        target_opt = o
+                                        break
 
-                    fields_filled += 1
-                    filled_labels.add(label_lower)
-                    if option_clicked:
-                        add_log("FILL_GREENHOUSE", f"Autocomplete '{label[:30]}' → '{value}' (option cliquée)", "SUCCESS")
-                    else:
-                        add_log("FILL_GREENHOUSE", f"Autocomplete '{label[:30]}' → '{value}' (tapé)", "SUCCESS")
-                except Exception as ac_err:
-                    add_log("FILL_GREENHOUSE", f"Erreur autocomplete '{label[:30]}': {str(ac_err)[:50]}", "WARNING")
+                            if target_opt:
+                                target_opt.click(timeout=1500)
+                                option_clicked = True
+                                fields_filled += 1
+                                filled_labels.add(label_lower)
+                                add_log("FILL_GREENHOUSE", f"Select '{label[:30]}' → '{target_opt.inner_text().strip()}'", "SUCCESS")
+                            else:
+                                form_ctx.keyboard.press("Escape")
+                    except Exception:
+                        pass
+
+                # 2. If ArrowDown didn't select an option, fallback to type-to-search
+                if not option_clicked:
+                    try:
+                        # Click → clear → type to trigger the dropdown
+                        el.click(timeout=2000)
+                        time.sleep(0.3)
+                        el.fill("", timeout=1000)  # Clear existing
+                        time.sleep(0.2)
+                        el.type(value, delay=50, timeout=5000)
+                        time.sleep(1)  # Wait for dropdown options to appear
+
+                        # Try to click the first visible dropdown option
+                        option_selectors = [
+                            f"div[role='option']", "li[role='option']",
+                            ".ss-option", ".select__option",
+                            "div.option", "ul.options li",
+                            "[class*='option']:not([class*='hidden'])"
+                        ]
+                        for opt_sel in option_selectors:
+                            try:
+                                opts = form_ctx.query_selector_all(opt_sel)
+                                for opt in opts:
+                                    try:
+                                        if opt.is_visible():
+                                            opt.click(timeout=1000)
+                                            option_clicked = True
+                                            break
+                                    except Exception:
+                                        continue
+                                if option_clicked:
+                                    break
+                            except Exception:
+                                continue
+
+                        fields_filled += 1
+                        filled_labels.add(label_lower)
+                        if option_clicked:
+                            add_log("FILL_GREENHOUSE", f"Autocomplete '{label[:30]}' → '{value}' (option cliquée)", "SUCCESS")
+                        else:
+                            add_log("FILL_GREENHOUSE", f"Autocomplete '{label[:30]}' → '{value}' (tapé)", "SUCCESS")
+                    except Exception as ac_err:
+                        add_log("FILL_GREENHOUSE", f"Erreur autocomplete '{label[:30]}': {str(ac_err)[:50]}", "WARNING")
                 continue
 
             # Skip already filled fields
@@ -305,7 +361,14 @@ class GreenhouseAgent(BasePlatformAgent):
             # ── Handle SELECT dropdowns ──
             if tag == "select" and options:
                 opt_labels = [o['label'] for o in options]
-                chosen = self.ask_llm_choose_option(label or "Select an option", opt_labels, cv_text)
+                
+                # Check if user provided an answer
+                field_id = self._get_field_id(el)
+                if user_responses and field_id in user_responses:
+                    chosen = user_responses[field_id]
+                    add_log("FILL_GREENHOUSE", f"✅ Utilisation de la réponse utilisateur pour : {field_id}", "SUCCESS")
+                else:
+                    chosen = self.ask_llm_choose_option(label or "Select an option", opt_labels, cv_text)
 
                 target_val = None
                 for o in options:
@@ -321,31 +384,53 @@ class GreenhouseAgent(BasePlatformAgent):
                         add_log("FILL_GREENHOUSE", f"Dropdown '{label[:30]}' → '{chosen}'", "SUCCESS")
                     except Exception as se:
                         add_log("FILL_GREENHOUSE", f"Erreur select '{label}': {str(se)[:50]}", "WARNING")
+                else:
+                    # Check if this is a required field that needs user input
+                    is_required = self._is_field_required(el)
+                    if is_required:
+                        pending_questions.append(self._build_pending_question(field_id, label, "select", is_required, opt_labels))
+                        add_log("FILL_GREENHOUSE", f"⚠️ Question en attente : {label}", "WARNING")
                 continue
 
             # ── Handle TEXT inputs and TEXTAREAS ──
             value = None
-
-            if 'first name' in label_lower or 'prénom' in label_lower or 'first_name' in label_lower:
-                value = first_name
-            elif 'last name' in label_lower or 'nom de famille' in label_lower or 'last_name' in label_lower:
-                value = last_name
-            elif 'email' in label_lower:
-                value = email_to_use
-            elif 'phone' in label_lower or 'téléphone' in label_lower:
-                value = phone_to_use
-            elif 'linkedin' in label_lower:
-                value = linkedin_url
-            elif 'github' in label_lower or 'portfolio' in label_lower or 'website' in label_lower or 'relevant link' in label_lower:
-                value = github_url
-            elif 'salary' in label_lower or 'salaire' in label_lower or 'compensation' in label_lower or 'expectation' in label_lower:
-                value = salary_expectation or self.ask_llm(label, cv_text, cover_letter)
-            elif 'cover letter' in label_lower or 'lettre de motivation' in label_lower:
-                value = cover_letter
-            elif label:
-                value = self.ask_llm(label, cv_text, cover_letter)
+            
+            # Check if user provided an answer
+            field_id = self._get_field_id(el)
+            if user_responses and field_id in user_responses:
+                value = user_responses[field_id]
+                add_log("FILL_GREENHOUSE", f"✅ Utilisation de la réponse utilisateur pour : {field_id}", "SUCCESS")
+            else:
+                if 'first name' in label_lower or 'prénom' in label_lower or 'first_name' in label_lower:
+                    value = first_name
+                elif 'last name' in label_lower or 'nom de famille' in label_lower or 'last_name' in label_lower:
+                    value = last_name
+                elif 'email' in label_lower:
+                    value = email_to_use
+                elif 'phone' in label_lower or 'téléphone' in label_lower:
+                    value = phone_to_use
+                elif 'linkedin' in label_lower:
+                    value = linkedin_url
+                elif 'github' in label_lower or 'portfolio' in label_lower or 'website' in label_lower or 'relevant link' in label_lower:
+                    value = github_url
+                elif 'salary' in label_lower or 'salaire' in label_lower or 'compensation' in label_lower or 'expectation' in label_lower:
+                    value = salary_expectation or self.ask_llm(label, cv_text, cover_letter)
+                elif 'cover letter' in label_lower or 'lettre de motivation' in label_lower:
+                    value = cover_letter
+                elif label:
+                    value = self.ask_llm(label, cv_text, cover_letter)
 
             if not value or value.lower() in ("none", "n/a", ""):
+                # Check if this is an important/required field that needs user input
+                is_required = self._is_field_required(el)
+                important_keywords = ["linkedin", "github", "portfolio", "website", "salary", "salaire", "compensation", "expectation", "why", "motivation", "cover letter", "lettre de motivation"]
+                # Long textareas are usually important questions
+                is_textarea = tag == "textarea"
+                
+                if is_required or any(keyword in label_lower for keyword in important_keywords) or is_textarea:
+                    field_type = "textarea" if is_textarea else "text"
+                    pending_questions.append(self._build_pending_question(field_id, label, field_type, is_required))
+                    add_log("FILL_GREENHOUSE", f"⚠️ Question en attente : {label}", "WARNING")
                 continue
 
             try:
@@ -416,7 +501,13 @@ class GreenhouseAgent(BasePlatformAgent):
                 if not opt_labels:
                     continue
 
-                chosen = self.ask_llm_choose_option(question, opt_labels, cv_text)
+                # Check if user provided an answer
+                field_id = question.lower().replace(" ", "_").replace("?", "")
+                if user_responses and field_id in user_responses:
+                    chosen = user_responses[field_id]
+                    add_log("FILL_GREENHOUSE", f"✅ Utilisation de la réponse utilisateur pour : {field_id}", "SUCCESS")
+                else:
+                    chosen = self.ask_llm_choose_option(question, opt_labels, cv_text)
 
                 for opt in options:
                     if chosen.lower() in opt["label"].lower() or opt["label"].lower() in chosen.lower():
@@ -427,6 +518,14 @@ class GreenhouseAgent(BasePlatformAgent):
                             break
                         except Exception:
                             pass
+                
+                # If we couldn't fill this radio group, check if it's important
+                if not any(chosen.lower() in opt["label"].lower() or opt["label"].lower() in chosen.lower() for opt in options):
+                    is_required = self._is_radio_group_required(form_ctx, question)
+                    important_keywords = ["sponsorship", "visa", "work authorization", "authoris", "authorized", "work permit"]
+                    if is_required or any(keyword in question.lower() for keyword in important_keywords):
+                        pending_questions.append(self._build_pending_question(field_id, question, "radio", is_required, opt_labels))
+                        add_log("FILL_GREENHOUSE", f"⚠️ Question en attente : {question}", "WARNING")
         except Exception as radio_err:
             add_log("FILL_GREENHOUSE", f"Erreur boutons radio: {str(radio_err)[:80]}", "WARNING")
 
@@ -441,10 +540,15 @@ class GreenhouseAgent(BasePlatformAgent):
             )
             if resume_input:
                 cv_path = cv.raw_file_url
-                if cv_path and not cv_path.startswith("http") and "/" in cv_path:
-                    abs_cv_path = f"/app/{cv_path}"
+                if cv_path and not cv_path.startswith("http"):
+                    abs_cv_path = f"/app/{cv_path}" if not os.path.exists(cv_path) else cv_path
                     if os.path.exists(abs_cv_path):
                         resume_input.set_input_files(abs_cv_path)
+                        try:
+                            resume_input.evaluate("el => { el.dispatchEvent(new Event('change', { bubbles: true })); el.dispatchEvent(new Event('input', { bubbles: true })); }")
+                        except Exception:
+                            pass
+                        time.sleep(3)  # Allow Greenhouse client-side S3 upload to finish
                         fields_filled += 1
                         add_log("FILL_GREENHOUSE", f"CV téléchargé : {cv.filename}", "SUCCESS")
         except Exception as e:
@@ -487,7 +591,38 @@ class GreenhouseAgent(BasePlatformAgent):
             add_log("FILL_GREENHOUSE", f"Erreur cases à cocher: {str(cb_err)[:80]}", "WARNING")
 
         add_log("FILL_GREENHOUSE", f"Remplissage terminé : {fields_filled} champ(s) rempli(s).", "SUCCESS")
-        return fields_filled > 0
+        return {"success": fields_filled > 0, "pending_questions": pending_questions}
+
+    def _is_field_required(self, element) -> bool:
+        """Check if a form field is marked as required."""
+        try:
+            if element.get_attribute("required"):
+                return True
+            class_attr = element.get_attribute("class") or ""
+            if "required" in class_attr.lower():
+                return True
+            if element.get_attribute("aria-required") == "true":
+                return True
+            try:
+                label = element.evaluate("el => { const labels = el.labels; return labels && labels.length > 0 ? labels[0].textContent : ''; }")
+                if label and "*" in label:
+                    return True
+            except Exception:
+                pass
+            return False
+        except Exception:
+            return False
+
+    def _is_radio_group_required(self, form_ctx, question_text: str) -> bool:
+        """Check if a radio button group is required."""
+        try:
+            radio_elements = form_ctx.query_selector_all("input[type='radio']")
+            for radio in radio_elements:
+                if self._is_field_required(radio):
+                    return True
+            return False
+        except Exception:
+            return False
 
     def submit_form(self, page, add_log) -> bool:
         try:
