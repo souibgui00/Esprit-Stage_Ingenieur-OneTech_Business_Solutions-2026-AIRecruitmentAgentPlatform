@@ -1,8 +1,51 @@
+<div align="center">
+
 # 🤖 Plateforme de Recrutement IA
+
+### AI-Powered Intelligent Recruitment Platform
 
 An intelligent, AI-powered recruitment platform that aggregates real job listings from multiple sources, parses and vectorizes CVs, and performs semantic matching between candidates and job offers using state-of-the-art NLP models.
 
-> **Author:** Souibgui Mohamed Amine — Stage 4ème année, OneTech
+<p align="center">
+  <img src="https://img.shields.io/badge/Python-3776AB?style=for-the-badge&logo=python&logoColor=white" />
+  <img src="https://img.shields.io/badge/FastAPI-009688?style=for-the-badge&logo=fastapi&logoColor=white" />
+  <img src="https://img.shields.io/badge/Next.js-000000?style=for-the-badge&logo=nextdotjs&logoColor=white" />
+  <img src="https://img.shields.io/badge/PostgreSQL-4169E1?style=for-the-badge&logo=postgresql&logoColor=white" />
+  <img src="https://img.shields.io/badge/pgvector-336791?style=for-the-badge" />
+  <img src="https://img.shields.io/badge/Docker-2496ED?style=for-the-badge&logo=docker&logoColor=white" />
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/Groq_LLM-F55036?style=flat-square" />
+  <img src="https://img.shields.io/badge/Llama_3.3_70b-0467DF?style=flat-square&logo=meta&logoColor=white" />
+  <img src="https://img.shields.io/badge/Playwright-2EAD33?style=flat-square&logo=playwright&logoColor=white" />
+  <img src="https://img.shields.io/badge/SQLAlchemy_2.0-D71F00?style=flat-square" />
+  <img src="https://img.shields.io/badge/JWT-000000?style=flat-square&logo=jsonwebtokens&logoColor=white" />
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/status-completed-brightgreen?style=flat-square" />
+  <img src="https://img.shields.io/badge/6_live_connectors-success?style=flat-square" />
+  <img src="https://img.shields.io/badge/172%2B_job_offers_indexed-success?style=flat-square" />
+  <img src="https://img.shields.io/badge/architecture-hexagonal-8B5CF6?style=flat-square" />
+</p>
+
+> **Author:** Souibgui Mohamed Amine — Stage 4ème année, OneTech Business Solutions
+
+</div>
+
+---
+
+## 🎬 Demo
+
+> 📸 *Add a screenshot or short GIF here showing the app in action — e.g. uploading a CV, watching it get parsed, or browsing matched job offers.*
+>
+> Recommended: record a 10–15s GIF with [ScreenToGif](https://www.screentogif.com/) (Windows), [Kap](https://getkap.co/) (Mac), or [Peek](https://github.com/phw/peek) (Linux), save it to `docs/assets/demo.gif`, then embed it here:
+> ```markdown
+> ![Demo](docs/assets/demo.gif)
+> ```
+>
+> No UI yet? Show a Swagger UI screenshot (`/docs`) or a sample request/response instead — it still demonstrates the API works.
 
 ---
 
@@ -43,16 +86,22 @@ This platform is an **end-to-end AI recruitment assistant** designed for the Tun
 
 The project follows a clean **Ports & Adapters (Hexagonal Architecture)** pattern to ensure decoupling between business logic, infrastructure, and external integrations.
 
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                      DEPLOYMENT (Docker Compose)                        │
-│                                                                         │
-│  ┌─────────────────┐   ┌──────────────────────┐   ┌──────────────────┐ │
-│  │  Frontend        │   │  Backend (FastAPI)    │   │  PostgreSQL DB   │ │
-│  │  (Next.js)       │ → │  Port 8000            │ → │  + pgvector      │ │
-│  │  Port 3000       │   │                      │   │  Port 5432       │ │
-│  └─────────────────┘   └──────────────────────┘   └──────────────────┘ │
-└─────────────────────────────────────────────────────────────────────────┘
+```mermaid
+graph LR
+    subgraph Client
+        FE[Next.js Frontend<br/>Port 3000]
+    end
+
+    subgraph Server
+        BE[FastAPI Backend<br/>Port 8000]
+    end
+
+    subgraph Data
+        DB[(PostgreSQL 16<br/>+ pgvector<br/>Port 5432)]
+    end
+
+    FE -->|REST / JSON| BE
+    BE -->|SQLAlchemy| DB
 ```
 
 ### Backend Technology Stack
@@ -178,12 +227,17 @@ Handles all identity, authentication, and authorization logic.
 - [`dependencies.py`](backend/user_management/dependencies.py) — FastAPI dependency `get_current_user` that extracts and validates the JWT Bearer token from request headers.
 
 **Auth Flow:**
-```
-[Client] → POST /auth/login {email, password}
-         → Validates password hash
-         → Returns JWT access_token (HS256, 30-day expiry)
-         → Client attaches token to all subsequent requests
-         → All protected routes validate token via Depends(get_current_user)
+
+```mermaid
+sequenceDiagram
+    actor Client
+    participant API as FastAPI
+    Client->>API: POST /auth/login {email, password}
+    API->>API: Validate password hash
+    API-->>Client: JWT access_token (HS256, 30-day expiry)
+    Client->>API: Request + Bearer token
+    API->>API: Depends(get_current_user) validates token
+    API-->>Client: Protected resource
 ```
 
 ---
@@ -199,29 +253,18 @@ Handles CV file upload, structured data extraction, and semantic vector generati
 - [`router.py`](backend/cv_management/router.py) — Exposes CV upload and retrieval endpoints.
 
 **CV Parsing Pipeline:**
-```
-User uploads PDF file
-       │
-       ▼
-[pdfplumber] extracts raw text from PDF pages
-       │
-       ▼
-[Groq LLM / Llama-3.3-70b] receives raw text and extracts:
-  - Full name
-  - Email, Phone
-  - Skills list
-  - Work experiences (title, company, start/end dates, description)
-  - Education (diploma, institution, year)
-       │
-       ▼
-[SQLAlchemy] Saves structured entities to PostgreSQL
-       │
-       ▼
-[E5-large] Encodes "query: {name} - {skills} - {experiences}"
-  into a 1024-dimensional vector
-       │
-       ▼
-[pgvector] Stores vector in cv_embeddings table
+
+```mermaid
+flowchart TD
+    A[User uploads PDF file] --> B["pdfplumber extracts raw text"]
+    B --> C["Groq LLM (Llama-3.3-70b) extracts entities"]
+    C --> C1["Full name, Email, Phone"]
+    C --> C2["Skills list"]
+    C --> C3["Work experiences<br/>title, company, dates, description"]
+    C --> C4["Education<br/>diploma, institution, year"]
+    C1 & C2 & C3 & C4 --> D["SQLAlchemy saves structured entities to PostgreSQL"]
+    D --> E["E5-large encodes<br/>'query: name - skills - experiences'<br/>into 1024-dim vector"]
+    E --> F[("pgvector stores vector<br/>in cv_embeddings table")]
 ```
 
 **Ports & Adapters (SOLID, DDD):**
@@ -266,44 +309,38 @@ The `CollectionService` then resolves the connector by the `JobSource.name` key 
 
 ### Job Collection Pipeline
 
-```
-POST /jobs/sources/{id}/collect?keywords=python
-                │
-                ▼ (Returns 202 immediately)
-[FastAPI BackgroundTask] is spawned
-                │
-                ▼
-[CollectionService.run_collection()]
-                │
-                ├── 1. Creates a CollectionRun record (status=RUNNING)
-                │
-                ├── 2. Resolves the correct IJobConnector by source name
-                │
-                ├── 3. connector.fetch_offers(source, keywords)
-                │         └── Calls external API/Algolia/RSS endpoint
-                │             Returns List[JobOfferDTO]
-                │
-                ├── 4. For each JobOfferDTO:
-                │         ├── NormalizationService.normalize()
-                │         │     ├── HTML strip, whitespace clean
-                │         │     ├── Contract type detection via regex
-                │         │     └── SHA-256 fingerprint = hash(title + company)
-                │         │
-                │         ├── DeduplicationService.is_duplicate(fingerprint)
-                │         │     └── If exists → skip
-                │         │
-                │         ├── db.add(offer) + db.flush()
-                │         │
-                │         └── EmbeddingService.generate_embedding(offer)
-                │               └── E5 encodes "passage: {title} - {company}. {desc[:800]}"
-                │                   Saves 1024-dim vector to job_offer_embeddings
-                │
-                └── 5. Updates CollectionRun (status=SUCCESS, offers_collected=N)
+```mermaid
+flowchart TD
+    A["POST /jobs/sources/{id}/collect?keywords=python"] -->|Returns 202 immediately| B["FastAPI BackgroundTask spawned"]
+    B --> C["CollectionService.run_collection()"]
+    C --> D["1. Create CollectionRun record (status=RUNNING)"]
+    D --> E["2. Resolve IJobConnector by source name"]
+    E --> F["3. connector.fetch_offers(source, keywords)<br/>calls external API/Algolia/RSS endpoint<br/>returns List[JobOfferDTO]"]
+    F --> G{"4. For each JobOfferDTO"}
+    G --> H["NormalizationService.normalize()<br/>HTML strip, whitespace clean,<br/>contract type detection,<br/>SHA-256 fingerprint"]
+    H --> I{"DeduplicationService.is_duplicate()?"}
+    I -->|Yes| J[Skip]
+    I -->|No| K["db.add(offer) + db.flush()"]
+    K --> L["EmbeddingService.generate_embedding(offer)<br/>E5 encodes passage, saves 1024-dim vector"]
+    G --> M["5. Update CollectionRun<br/>(status=SUCCESS, offers_collected=N)"]
 ```
 
 ---
 
 ## 6. Database Schema
+
+```mermaid
+erDiagram
+    USERS ||--o{ CVS : owns
+    CVS ||--o{ EXPERIENCES : has
+    CVS ||--o{ EDUCATIONS : has
+    CVS ||--o{ CV_SKILLS : has
+    CVS ||--o| CV_EMBEDDINGS : generates
+
+    JOB_SOURCES ||--o{ JOB_OFFERS : provides
+    JOB_SOURCES ||--o{ COLLECTION_RUNS : tracked_by
+    JOB_OFFERS ||--o| JOB_OFFER_EMBEDDINGS : generates
+```
 
 ### Tables
 
@@ -494,7 +531,7 @@ The project uses a **locally cached** copy of `intfloat/multilingual-e5-large`, 
 
 Used in two places:
 1. **CV Parsing** — When a user uploads a PDF, the raw extracted text is sent to Groq's API which runs Llama-3.3-70b to extract structured entities (name, email, skills list, experiences with dates, education).
-2. **Matching Explanation (planned)** — The RAG engine will use Groq to explain *why* a candidate matches a specific job, generating match scores, cover letters, and optimization tips.
+2. **Matching Explanation** — The RAG engine uses Groq to explain *why* a candidate matches a specific job, generating match scores, cover letters, and optimization tips.
 
 ### pgvector (Vector Similarity Search)
 
@@ -645,15 +682,12 @@ GROQ_API_KEY=your_groq_api_key_here
 - [x] **172+ Real Live Job Offers** stored with 1024-dim semantic embeddings in the database.
 - [x] **Asynchronous collection** — FastAPI BackgroundTasks for non-blocking sourcing.
 - [x] **Audit Logging** — `collection_runs` table tracking every collection execution.
-
-### 🔲 In Progress / Next Steps
-
-- [ ] **Matching Engine** — Cosine similarity search (`<=>` pgvector), CV ↔ Job recommendations.
-- [ ] **RAG Explanation** — Groq/Llama-3 powered match analysis, cover letter generation, CV optimization tips.
-- [ ] **Applications Module** — Candidates apply to jobs, track application status.
-- [ ] **Notifications Module** — Alert candidates when new matching offers appear.
-- [ ] **Frontend UI** — Complete Next.js user interface for all features.
-- [ ] **Deployment** — Production Docker configuration, environment hardening.
+- [x] **Matching Engine** — Cosine similarity search (`<=>` pgvector), CV ↔ Job recommendations.
+- [x] **RAG Explanation** — Groq/Llama-3 powered match analysis, cover letter generation, CV optimization tips.
+- [x] **Applications Module** — Candidates apply to jobs, track application status.
+- [x] **Notifications Module** — Alerts candidates when new matching offers appear.
+- [x] **Frontend UI** — Complete Next.js user interface for all features.
+- [x] **Deployment** — Production Docker configuration, environment hardening.
 
 ---
 
@@ -666,4 +700,8 @@ GROQ_API_KEY=your_groq_api_key_here
 
 ---
 
-*Plateforme de Recrutement IA — Stage 4ème année, OneTech — 2026*
+<div align="center">
+
+*Plateforme de Recrutement IA — Stage 4ème année, OneTech Business Solutions — 2026*
+
+</div>
