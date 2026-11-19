@@ -36,19 +36,6 @@ An intelligent, AI-powered recruitment platform that aggregates real job listing
 
 ---
 
-## 🎬 Demo
-
-> 📸 *Add a screenshot or short GIF here showing the app in action — e.g. uploading a CV, watching it get parsed, or browsing matched job offers.*
->
-> Recommended: record a 10–15s GIF with [ScreenToGif](https://www.screentogif.com/) (Windows), [Kap](https://getkap.co/) (Mac), or [Peek](https://github.com/phw/peek) (Linux), save it to `docs/assets/demo.gif`, then embed it here:
-> ```markdown
-> ![Demo](docs/assets/demo.gif)
-> ```
->
-> No UI yet? Show a Swagger UI screenshot (`/docs`) or a sample request/response instead — it still demonstrates the API works.
-
----
-
 ## 📋 Table of Contents
 
 1. [Project Overview](#1-project-overview)
